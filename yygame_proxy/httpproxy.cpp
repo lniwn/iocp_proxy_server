@@ -177,12 +177,13 @@ void CIOCPServer::iocpWorker()
 		switch (pIoData->opType)
 		{
 		case IO_OPT_TYPE::ACCEPT_POSTED:
-			bOk = doAccept(pHandleData, pIoData);
+			bOk = onAcceptPosted(pHandleData, pIoData);
 			break;
 		case IO_OPT_TYPE::RECV_POSTED:
-			bOk = doRecv(pHandleData, pIoData);
+			bOk = onRecvPosted(pHandleData, pIoData, dwTransferred);
 			break;
 		case IO_OPT_TYPE::SEND_POSTED:
+			bOk = onSendPosted(pHandleData, pIoData, dwTransferred);
 			break;
 		case IO_OPT_TYPE::NONE_POSTED:
 		default:
@@ -198,7 +199,7 @@ void CIOCPServer::iocpWorker()
 	assert(pHandleData == NULL);
 }
 
-bool CIOCPServer::doAccept(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
+bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	// recv与accept公用一个PER_IO_DATA
 	pIoData->Reset();
@@ -222,11 +223,16 @@ bool CIOCPServer::postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 	return true;
 }
 
-bool CIOCPServer::doRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
+bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
 {
 	auto pSendData = pHandleData->AcquireBuffer(IO_OPT_TYPE::SEND_POSTED);
-	pSendData->SetPayload(pIoData->buffer, pIoData->wsaBuffer.len);
+	pSendData->SetPayload(pIoData->buffer, dwLen);
 	return postRecv(pHandleData, pIoData) && postSend(pHandleData, pSendData);
+}
+
+bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
+{
+	return true;
 }
 
 bool CIOCPServer::postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)

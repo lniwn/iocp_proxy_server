@@ -56,9 +56,10 @@ private:
 	void uninit();
 	void handleAccept(SOCKET hListen);
 	void iocpWorker();
-	bool doAccept(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
 	bool postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
-	bool doRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
+	bool onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
 	bool postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
 	bool handleError(LPPER_HANDLE_DATA &pHandleData, DWORD dwErr);
 	static DWORD WINAPI associateWithIOCP(_In_ LPVOID lpParameter);
