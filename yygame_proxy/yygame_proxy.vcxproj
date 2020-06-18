@@ -140,13 +140,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
-    <ClInclude Include="httpproxy.h" />
+    <ClInclude Include="iocp_server.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="yygame_proxy.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="httpproxy.cpp" />
+    <ClCompile Include="iocp_server.cpp" />
     <ClCompile Include="yygame_proxy.cpp" />
   </ItemGroup>
   <ItemGroup>

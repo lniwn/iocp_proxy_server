@@ -4,7 +4,7 @@
 #include "framework.h"
 #include <winsock2.h>
 #include "yygame_proxy.h"
-#include "httpproxy.h"
+#include "iocp_server.h"
 
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,

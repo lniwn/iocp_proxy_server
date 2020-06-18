@@ -3,7 +3,7 @@
 #include <ws2tcpip.h>
 #include <cassert>
 #include <functional>
-#include "httpproxy.h"
+#include "iocp_server.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 

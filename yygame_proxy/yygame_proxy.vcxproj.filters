@@ -27,7 +27,7 @@
     <ClInclude Include="yygame_proxy.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="httpproxy.h">
+    <ClInclude Include="iocp_server.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
@@ -35,7 +35,7 @@
     <ClCompile Include="yygame_proxy.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="httpproxy.cpp">
+    <ClCompile Include="iocp_server.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
