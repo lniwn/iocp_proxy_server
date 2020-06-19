@@ -115,10 +115,10 @@ void CIOCPServer::handleAccept(SOCKET hListen)
 	auto fnLambda = new std::function<void()>(
 		[=]() {
 			LPPER_HANDLE_DATA pHandleData = new PER_HANDLE_DATA;
-			pHandleData->hClient = hClient;
-			memcpy_s(&pHandleData->clientAddr, sizeof(pHandleData->clientAddr), &clientAddr, addrLen);
+			pHandleData->hPeer = hClient;
+			memcpy_s(&pHandleData->peerAddr, sizeof(pHandleData->peerAddr), &clientAddr, addrLen);
 
-			::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pHandleData->hClient), m_hIOCP, reinterpret_cast<ULONG_PTR>(pHandleData), 0);
+			::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pHandleData->hPeer), m_hIOCP, reinterpret_cast<ULONG_PTR>(pHandleData), 0);
 
 			auto pIoData = pHandleData->AcquireBuffer(IO_OPT_TYPE::ACCEPT_POSTED);
 			::PostQueuedCompletionStatus(m_hIOCP, 0, reinterpret_cast<ULONG_PTR>(pHandleData), &pIoData->overlapped);
@@ -216,7 +216,7 @@ bool CIOCPServer::postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	pIoData->opType = IO_OPT_TYPE::RECV_POSTED;
 	DWORD dwFlag = 0;
-	if (::WSARecv(pHandleData->hClient, &pIoData->wsaBuffer, 1, NULL, &dwFlag, &pIoData->overlapped, NULL) != 0)
+	if (::WSARecv(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, &dwFlag, &pIoData->overlapped, NULL) != 0)
 	{
 		return ::WSAGetLastError() == WSA_IO_PENDING;
 	}
@@ -239,7 +239,7 @@ bool CIOCPServer::postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	pIoData->opType = IO_OPT_TYPE::SEND_POSTED;
 	DWORD dwFlag = 0;
-	if (::WSASend(pHandleData->hClient, &pIoData->wsaBuffer, 1, NULL, dwFlag, &pIoData->overlapped, NULL) != 0)
+	if (::WSASend(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, dwFlag, &pIoData->overlapped, NULL) != 0)
 	{
 		return ::WSAGetLastError() == WSA_IO_PENDING;
 	}
@@ -325,16 +325,16 @@ bool _PER_IO_DATA::SetPayload(const char* src, size_t length)
 
 _PER_HANDLE_DATA::_PER_HANDLE_DATA()
 {
-	hClient = INVALID_SOCKET;
-	::ZeroMemory(&clientAddr, sizeof(SOCKADDR_STORAGE));
+	hPeer = INVALID_SOCKET;
+	::ZeroMemory(&peerAddr, sizeof(SOCKADDR_STORAGE));
 }
 
 _PER_HANDLE_DATA::~_PER_HANDLE_DATA()
 {
-	if (hClient != INVALID_SOCKET)
+	if (hPeer != INVALID_SOCKET)
 	{
-		::closesocket(hClient);
-		hClient = INVALID_SOCKET;
+		::closesocket(hPeer);
+		hPeer = INVALID_SOCKET;
 	}
 }
 

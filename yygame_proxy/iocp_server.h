@@ -31,8 +31,8 @@ typedef struct _PER_IO_DATA
 
 typedef struct _PER_HANDLE_DATA
 {
-	SOCKET hClient;
-	SOCKADDR_STORAGE clientAddr;
+	SOCKET hPeer;
+	SOCKADDR_STORAGE peerAddr;
 	std::map<ULONG_PTR, std::shared_ptr<PER_IO_DATA>> usedIoList;
 	std::vector<std::shared_ptr<PER_IO_DATA>> freeIoList;
 	std::mutex ioGuard;
