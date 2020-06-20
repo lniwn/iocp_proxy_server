@@ -1,12 +1,5 @@
 #pragma once
 
-#include <memory>
-#include <atomic>
-#include <thread>
-#include <mutex>
-#include <map>
-#include <vector>
-
 constexpr int HTTPPROXY_BUFFER_LENGTH = (8 << 10);
 
 enum class IO_OPT_TYPE
@@ -64,8 +57,18 @@ private:
 	bool handleError(LPPER_HANDLE_DATA &pHandleData, DWORD dwErr);
 	static DWORD WINAPI associateWithIOCP(_In_ LPVOID lpParameter);
 
+	// http tunnel forward
+	LPPER_HANDLE_DATA getTunnelHandle(const LPPER_HANDLE_DATA pKey);
+	void putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData);
+	DWORD createTunnelHandle(const SOCKADDR_IN& peerAddr, LPPER_HANDLE_DATA* pData);
+	void destroyTunnelHandle(const LPPER_HANDLE_DATA pKey);
+	void removeTunnelHandle(const LPPER_HANDLE_DATA pKey, bool bAll = true);
+
 private:
 	HANDLE m_hIOCP;
 	std::vector<std::shared_ptr<std::thread>> m_workers;
+	std::map<LPPER_HANDLE_DATA, LPPER_HANDLE_DATA> m_tunnelTable;
+	std::map<std::string, ULONG> m_dnsCache; // domain ip
 	std::atomic_bool m_bRun;
+	std::recursive_mutex m_tunnelGuard;
 };

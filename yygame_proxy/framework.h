@@ -13,3 +13,13 @@
 #include <malloc.h>
 #include <memory.h>
 #include <tchar.h>
+
+// C++ 标准库
+#include <memory>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <map>
+#include <vector>
+#include <functional>
+#include <cassert>

@@ -1,11 +1,16 @@
 #include "framework.h"
 #include <WinSock2.h>
 #include <ws2tcpip.h>
-#include <cassert>
-#include <functional>
+#include <mswsock.h>
 #include "iocp_server.h"
 
 #pragma comment(lib, "Ws2_32.lib")
+
+static LPFN_CONNECTEX PtrConnectEx;
+static LPFN_CONNECTEX PtrDisconnectEx;
+
+#define  DEFER_SOCKET(hDummy) \
+	std::shared_ptr<SOCKET> _defer_##hDummy(&hDummy, [](SOCKET* hDelegated) { ::closesocket(*hDelegated); })
 
 DWORD CIOCPServer::StartServer(unsigned short port)
 {
@@ -63,6 +68,26 @@ CIOCPServer::CIOCPServer()
 
 DWORD CIOCPServer::init()
 {
+	SOCKET hDummy = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (hDummy == INVALID_SOCKET)
+	{
+		return ::WSAGetLastError();
+	}
+	DEFER_SOCKET(hDummy);
+
+	DWORD dwBytes = 0;
+	// ConnectEx
+	{
+		assert(PtrConnectEx == NULL);
+		GUID guidConnectEx = WSAID_CONNECTEX;
+		if (SOCKET_ERROR == ::WSAIoctl(hDummy, SIO_GET_EXTENSION_FUNCTION_POINTER, &guidConnectEx,
+			sizeof(guidConnectEx), &PtrConnectEx, sizeof(PtrConnectEx), &dwBytes, NULL, NULL))
+		{
+			return ::WSAGetLastError();
+		}
+		assert(PtrConnectEx != NULL);
+	}
+
 	m_hIOCP = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, 0);
 	SYSTEM_INFO sysInfo = { 0 };
 	::GetSystemInfo(&sysInfo);
@@ -72,6 +97,7 @@ DWORD CIOCPServer::init()
 		auto worker = std::make_shared<std::thread>(&CIOCPServer::iocpWorker, this);
 		m_workers.push_back(worker);
 	}
+
 	return ERROR_SUCCESS;
 }
 
@@ -111,6 +137,11 @@ void CIOCPServer::handleAccept(SOCKET hListen)
 	SOCKADDR_IN clientAddr = { 0 };
 	int addrLen = sizeof(clientAddr);
 	SOCKET hClient = ::WSAAccept(hListen, (PSOCKADDR)&clientAddr, &addrLen, NULL, NULL);
+	if (hClient == INVALID_SOCKET)
+	{
+		assert(0);
+		return;
+	}
 
 	auto fnLambda = new std::function<void()>(
 		[=]() {
@@ -160,7 +191,6 @@ void CIOCPServer::iocpWorker()
 		if (pHandleData == NULL || pOverlapped == NULL)
 		{
 			// 退出通知
-			m_bRun = false;
 			break;
 		}
 		pIoData = CONTAINING_RECORD(pOverlapped, PER_IO_DATA, overlapped);
@@ -168,7 +198,7 @@ void CIOCPServer::iocpWorker()
 		if (dwTransferred == 0 && pIoData->opType != IO_OPT_TYPE::ACCEPT_POSTED)
 		{
 			// 客户端断开
-			delete pHandleData;
+			destroyTunnelHandle(pHandleData);
 			pHandleData = NULL;
 			continue;
 		}
@@ -278,7 +308,7 @@ bool CIOCPServer::handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr)
 		break;
 	}
 
-	delete pHandleData;
+	destroyTunnelHandle(pHandleData);
 	pHandleData = NULL;
 	return bResult;
 }
@@ -289,6 +319,74 @@ DWORD WINAPI CIOCPServer::associateWithIOCP(_In_ LPVOID lpParameter)
 	(*fnLambda)();
 	delete fnLambda;
 	return 0;
+}
+
+LPPER_HANDLE_DATA CIOCPServer::getTunnelHandle(const LPPER_HANDLE_DATA pKey)
+{
+	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
+	auto itTarget = m_tunnelTable.find(pKey);
+	if (itTarget == m_tunnelTable.end())
+	{
+		return NULL;
+	}
+	else
+	{
+		return itTarget->second;
+	}
+}
+
+void CIOCPServer::putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData)
+{
+	assert(pKey != NULL);
+	assert(pData != NULL);
+	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
+	m_tunnelTable[pKey] = pData;
+	m_tunnelTable[pData] = pKey;
+}
+
+DWORD CIOCPServer::createTunnelHandle(const SOCKADDR_IN& peerAddr, LPPER_HANDLE_DATA* pData)
+{
+	SOCKET hSocket = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (hSocket == INVALID_SOCKET)
+	{
+		return ::WSAGetLastError();
+	}
+
+	if (0 != ::WSAConnect(hSocket, reinterpret_cast<const sockaddr*>(&peerAddr), sizeof(SOCKADDR_IN),
+		NULL, NULL, NULL, NULL))
+	{
+		::closesocket(hSocket);
+		return ::WSAGetLastError();
+	}
+
+	*pData = new PER_HANDLE_DATA;
+	(*pData)->hPeer = hSocket;
+	memcpy_s(&(*pData)->peerAddr, sizeof((*pData)->peerAddr), &peerAddr, sizeof(SOCKADDR_IN));
+
+	::CreateIoCompletionPort(reinterpret_cast<HANDLE>(hSocket), m_hIOCP, reinterpret_cast<ULONG_PTR>(*pData), 0);
+
+	return ERROR_SUCCESS;
+}
+
+void CIOCPServer::destroyTunnelHandle(const LPPER_HANDLE_DATA pKey)
+{
+	removeTunnelHandle(pKey);
+	delete pKey;
+}
+
+void CIOCPServer::removeTunnelHandle(const LPPER_HANDLE_DATA pKey, bool bAll)
+{
+	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
+	if (bAll)
+	{
+		auto pData = getTunnelHandle(pKey);
+		if (pData != NULL)
+		{
+			m_tunnelTable.erase(pData);
+		}
+	}
+
+	m_tunnelTable.erase(pKey);
 }
 
 _PER_IO_DATA::_PER_IO_DATA(IO_OPT_TYPE opType)
