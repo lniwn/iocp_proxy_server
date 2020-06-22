@@ -1,5 +1,4 @@
 #include "framework.h"
-#include <WinSock2.h>
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include "iocp_server.h"
@@ -31,6 +30,10 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 	{
 		return ::WSAGetLastError();
 	}
+
+	// 设置SO_REUSEADDR，防止程序异常退出，重启之后无法绑定对应端口
+	int optReuse = 1;
+	::setsockopt(l, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&optReuse), sizeof(optReuse));
 
 	if (SOCKET_ERROR == ::bind(l, (const PSOCKADDR)&addr, sizeof(addr)))
 	{
@@ -64,6 +67,11 @@ CIOCPServer::CIOCPServer()
 {
 	m_bRun = true;
 	m_hIOCP = NULL;
+}
+
+CIOCPServer::~CIOCPServer()
+{
+
 }
 
 DWORD CIOCPServer::init()
@@ -145,9 +153,8 @@ void CIOCPServer::handleAccept(SOCKET hListen)
 
 	auto fnLambda = new std::function<void()>(
 		[=]() {
-			LPPER_HANDLE_DATA pHandleData = new PER_HANDLE_DATA;
-			pHandleData->hPeer = hClient;
-			memcpy_s(&pHandleData->peerAddr, sizeof(pHandleData->peerAddr), &clientAddr, addrLen);
+			LPPER_HANDLE_DATA pHandleData = PER_HANDLE_DATA::Create(hClient,
+				reinterpret_cast<const SOCKADDR_STORAGE*>(&clientAddr), addrLen);
 
 			::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pHandleData->hPeer), m_hIOCP, reinterpret_cast<ULONG_PTR>(pHandleData), 0);
 
@@ -198,7 +205,8 @@ void CIOCPServer::iocpWorker()
 		if (dwTransferred == 0 && pIoData->opType != IO_OPT_TYPE::ACCEPT_POSTED)
 		{
 			// 客户端断开
-			destroyTunnelHandle(pHandleData);
+			onDisconnected(pHandleData);
+			delete pHandleData;
 			pHandleData = NULL;
 			continue;
 		}
@@ -233,7 +241,7 @@ bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pI
 {
 	// recv与accept公用一个PER_IO_DATA
 	pIoData->Reset();
-	if (!postRecv(pHandleData, pIoData))
+	if (!PostRecv(pHandleData, pIoData))
 	{
 		return false;
 	}
@@ -242,7 +250,7 @@ bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pI
 	return true;
 }
 
-bool CIOCPServer::postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
+bool CIOCPServer::PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	pIoData->opType = IO_OPT_TYPE::RECV_POSTED;
 	DWORD dwFlag = 0;
@@ -255,17 +263,25 @@ bool CIOCPServer::postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 
 bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
 {
-	auto pSendData = pHandleData->AcquireBuffer(IO_OPT_TYPE::SEND_POSTED);
-	pSendData->SetPayload(pIoData->buffer, dwLen);
-	return postRecv(pHandleData, pIoData) && postSend(pHandleData, pSendData);
+	return PostRecv(pHandleData, pIoData);
 }
 
-bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
+bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA, LPPER_IO_DATA, DWORD)
 {
 	return true;
 }
 
-bool CIOCPServer::postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
+void CIOCPServer::onServerError(LPPER_HANDLE_DATA, DWORD)
+{
+
+}
+
+void CIOCPServer::onDisconnected(LPPER_HANDLE_DATA)
+{
+
+}
+
+bool CIOCPServer::PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	pIoData->opType = IO_OPT_TYPE::SEND_POSTED;
 	DWORD dwFlag = 0;
@@ -274,6 +290,11 @@ bool CIOCPServer::postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 		return ::WSAGetLastError() == WSA_IO_PENDING;
 	}
 	return true;
+}
+
+HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads)
+{
+	return ::CreateIoCompletionPort(hFile, m_hIOCP, CompletionKey, NumberOfConcurrentThreads);
 }
 
 bool CIOCPServer::handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr)
@@ -308,7 +329,8 @@ bool CIOCPServer::handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr)
 		break;
 	}
 
-	destroyTunnelHandle(pHandleData);
+	onServerError(pHandleData, dwErr);
+	delete pHandleData;
 	pHandleData = NULL;
 	return bResult;
 }
@@ -319,74 +341,6 @@ DWORD WINAPI CIOCPServer::associateWithIOCP(_In_ LPVOID lpParameter)
 	(*fnLambda)();
 	delete fnLambda;
 	return 0;
-}
-
-LPPER_HANDLE_DATA CIOCPServer::getTunnelHandle(const LPPER_HANDLE_DATA pKey)
-{
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	auto itTarget = m_tunnelTable.find(pKey);
-	if (itTarget == m_tunnelTable.end())
-	{
-		return NULL;
-	}
-	else
-	{
-		return itTarget->second;
-	}
-}
-
-void CIOCPServer::putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData)
-{
-	assert(pKey != NULL);
-	assert(pData != NULL);
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	m_tunnelTable[pKey] = pData;
-	m_tunnelTable[pData] = pKey;
-}
-
-DWORD CIOCPServer::createTunnelHandle(const SOCKADDR_IN& peerAddr, LPPER_HANDLE_DATA* pData)
-{
-	SOCKET hSocket = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (hSocket == INVALID_SOCKET)
-	{
-		return ::WSAGetLastError();
-	}
-
-	if (0 != ::WSAConnect(hSocket, reinterpret_cast<const sockaddr*>(&peerAddr), sizeof(SOCKADDR_IN),
-		NULL, NULL, NULL, NULL))
-	{
-		::closesocket(hSocket);
-		return ::WSAGetLastError();
-	}
-
-	*pData = new PER_HANDLE_DATA;
-	(*pData)->hPeer = hSocket;
-	memcpy_s(&(*pData)->peerAddr, sizeof((*pData)->peerAddr), &peerAddr, sizeof(SOCKADDR_IN));
-
-	::CreateIoCompletionPort(reinterpret_cast<HANDLE>(hSocket), m_hIOCP, reinterpret_cast<ULONG_PTR>(*pData), 0);
-
-	return ERROR_SUCCESS;
-}
-
-void CIOCPServer::destroyTunnelHandle(const LPPER_HANDLE_DATA pKey)
-{
-	removeTunnelHandle(pKey);
-	delete pKey;
-}
-
-void CIOCPServer::removeTunnelHandle(const LPPER_HANDLE_DATA pKey, bool bAll)
-{
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	if (bAll)
-	{
-		auto pData = getTunnelHandle(pKey);
-		if (pData != NULL)
-		{
-			m_tunnelTable.erase(pData);
-		}
-	}
-
-	m_tunnelTable.erase(pKey);
 }
 
 _PER_IO_DATA::_PER_IO_DATA(IO_OPT_TYPE opType)
@@ -470,4 +424,12 @@ void _PER_HANDLE_DATA::ReleaseBuffer(LPPER_IO_DATA data)
 	{
 		assert(false && static_cast<int>(data->opType));
 	}
+}
+
+LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr, size_t length)
+{
+	auto pThis = new PER_HANDLE_DATA;
+	pThis->hPeer = hSock;
+	memcpy_s(&pThis->peerAddr, sizeof(pThis->peerAddr), pAddr, length);
+	return pThis;
 }

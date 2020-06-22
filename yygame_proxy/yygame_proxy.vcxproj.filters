@@ -30,12 +30,18 @@
     <ClInclude Include="iocp_server.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="http_tunnel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="yygame_proxy.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="iocp_server.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="http_tunnel.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

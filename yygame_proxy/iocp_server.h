@@ -1,4 +1,5 @@
 #pragma once
+#include <WinSock2.h>
 
 constexpr int HTTPPROXY_BUFFER_LENGTH = (8 << 10);
 
@@ -30,10 +31,13 @@ typedef struct _PER_HANDLE_DATA
 	std::vector<std::shared_ptr<PER_IO_DATA>> freeIoList;
 	std::mutex ioGuard;
 
-	_PER_HANDLE_DATA();
-	~_PER_HANDLE_DATA();
 	LPPER_IO_DATA AcquireBuffer(IO_OPT_TYPE bufferType);
 	void ReleaseBuffer(LPPER_IO_DATA data);
+	static _PER_HANDLE_DATA* Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr, size_t length);
+	~_PER_HANDLE_DATA();
+
+private:
+	_PER_HANDLE_DATA();
 } PER_HANDLE_DATA, * LPPER_HANDLE_DATA;
 
 class CIOCPServer
@@ -42,33 +46,30 @@ public:
 	DWORD StartServer(unsigned short port);
 	void StopServer();
 
+	bool PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	bool PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	HANDLE AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads);
+
 	CIOCPServer();
+	virtual ~CIOCPServer();
 
 private:
 	DWORD init();
 	void uninit();
 	void handleAccept(SOCKET hListen);
 	void iocpWorker();
-	bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
-	bool postRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
-	bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
-	bool onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
-	bool postSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
-	bool handleError(LPPER_HANDLE_DATA &pHandleData, DWORD dwErr);
+	bool handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr);
 	static DWORD WINAPI associateWithIOCP(_In_ LPVOID lpParameter);
 
-	// http tunnel forward
-	LPPER_HANDLE_DATA getTunnelHandle(const LPPER_HANDLE_DATA pKey);
-	void putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData);
-	DWORD createTunnelHandle(const SOCKADDR_IN& peerAddr, LPPER_HANDLE_DATA* pData);
-	void destroyTunnelHandle(const LPPER_HANDLE_DATA pKey);
-	void removeTunnelHandle(const LPPER_HANDLE_DATA pKey, bool bAll = true);
+protected:
+	virtual bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	virtual bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
+	virtual bool onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
+	virtual void onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr);
+	virtual void onDisconnected(LPPER_HANDLE_DATA pHandleData);
 
 private:
 	HANDLE m_hIOCP;
 	std::vector<std::shared_ptr<std::thread>> m_workers;
-	std::map<LPPER_HANDLE_DATA, LPPER_HANDLE_DATA> m_tunnelTable;
-	std::map<std::string, ULONG> m_dnsCache; // domain ip
 	std::atomic_bool m_bRun;
-	std::recursive_mutex m_tunnelGuard;
 };
