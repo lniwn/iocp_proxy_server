@@ -1,7 +1,7 @@
 #pragma once
 #include <WinSock2.h>
 
-constexpr int HTTPPROXY_BUFFER_LENGTH = (8 << 10);
+constexpr int HTTPPROXY_BUFFER_LENGTH = ((4 << 10) - 1);
 
 enum class IO_OPT_TYPE
 {
@@ -15,11 +15,11 @@ typedef struct _PER_IO_DATA
 {
 	OVERLAPPED overlapped;
 	WSABUF wsaBuffer;
-	char buffer[HTTPPROXY_BUFFER_LENGTH];
+	char buffer[HTTPPROXY_BUFFER_LENGTH + 1];
 	IO_OPT_TYPE opType;
 
 	explicit _PER_IO_DATA(IO_OPT_TYPE);
-	void Reset();
+	void Reset(IO_OPT_TYPE optType = IO_OPT_TYPE::NONE_POSTED);
 	bool SetPayload(const char* src, size_t length);
 } PER_IO_DATA, * LPPER_IO_DATA;
 
@@ -27,17 +27,20 @@ typedef struct _PER_HANDLE_DATA
 {
 	SOCKET hPeer;
 	SOCKADDR_STORAGE peerAddr;
-	std::map<ULONG_PTR, std::shared_ptr<PER_IO_DATA>> usedIoList;
-	std::vector<std::shared_ptr<PER_IO_DATA>> freeIoList;
-	std::mutex ioGuard;
+	std::atomic_ulong uUser;
 
 	LPPER_IO_DATA AcquireBuffer(IO_OPT_TYPE bufferType);
 	void ReleaseBuffer(LPPER_IO_DATA data);
-	static _PER_HANDLE_DATA* Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr, size_t length);
+	static _PER_HANDLE_DATA* Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr, 
+		size_t length, unsigned long user = 0UL);
 	~_PER_HANDLE_DATA();
 
 private:
 	_PER_HANDLE_DATA();
+
+	std::map<ULONG_PTR, std::shared_ptr<PER_IO_DATA>> usedIoList;
+	std::vector<std::shared_ptr<PER_IO_DATA>> freeIoList;
+	std::mutex ioGuard;
 } PER_HANDLE_DATA, * LPPER_HANDLE_DATA;
 
 class CIOCPServer

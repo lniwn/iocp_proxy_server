@@ -240,7 +240,7 @@ void CIOCPServer::iocpWorker()
 bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
 	// recv与accept公用一个PER_IO_DATA
-	pIoData->Reset();
+	pIoData->Reset(IO_OPT_TYPE::RECV_POSTED);
 	if (!PostRecv(pHandleData, pIoData))
 	{
 		return false;
@@ -266,8 +266,9 @@ bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoD
 	return PostRecv(pHandleData, pIoData);
 }
 
-bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA, LPPER_IO_DATA, DWORD)
+bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
 {
+	pHandleData->ReleaseBuffer(pIoData);
 	return true;
 }
 
@@ -345,22 +346,21 @@ DWORD WINAPI CIOCPServer::associateWithIOCP(_In_ LPVOID lpParameter)
 
 _PER_IO_DATA::_PER_IO_DATA(IO_OPT_TYPE opType)
 {
-	Reset();
-	this->opType = opType;
+	Reset(opType);
 }
 
-void _PER_IO_DATA::Reset()
+void _PER_IO_DATA::Reset(IO_OPT_TYPE opType)
 {
 	::ZeroMemory(this, sizeof(*this));
 	wsaBuffer.buf = buffer;
-	wsaBuffer.len = _countof(buffer);
-	opType = IO_OPT_TYPE::NONE_POSTED;
+	wsaBuffer.len = HTTPPROXY_BUFFER_LENGTH;
+	this->opType = opType;
 }
 
 bool _PER_IO_DATA::SetPayload(const char* src, size_t length)
 {
-	static_assert(sizeof(this->buffer) == HTTPPROXY_BUFFER_LENGTH, "assert error");
-	::ZeroMemory(this->buffer, HTTPPROXY_BUFFER_LENGTH);
+	static_assert(sizeof(this->buffer) == HTTPPROXY_BUFFER_LENGTH + 1, "assert error");
+	::ZeroMemory(this->buffer, HTTPPROXY_BUFFER_LENGTH + 1);
 
 	assert(length <= HTTPPROXY_BUFFER_LENGTH);
 	if (memcpy_s(this->buffer, HTTPPROXY_BUFFER_LENGTH, src, length) == 0)
@@ -378,6 +378,7 @@ bool _PER_IO_DATA::SetPayload(const char* src, size_t length)
 _PER_HANDLE_DATA::_PER_HANDLE_DATA()
 {
 	hPeer = INVALID_SOCKET;
+	uUser = 0UL;
 	::ZeroMemory(&peerAddr, sizeof(SOCKADDR_STORAGE));
 }
 
@@ -399,8 +400,7 @@ LPPER_IO_DATA _PER_HANDLE_DATA::AcquireBuffer(IO_OPT_TYPE bufferType)
 		freeIoList.pop_back();
 		usedIoList.insert({ reinterpret_cast<ULONG_PTR>(data.get()), data });
 
-		data->Reset();
-		data->opType = bufferType;
+		data->Reset(bufferType);
 		return data.get();
 	}
 	else
@@ -426,10 +426,12 @@ void _PER_HANDLE_DATA::ReleaseBuffer(LPPER_IO_DATA data)
 	}
 }
 
-LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr, size_t length)
+LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr,
+	size_t length, unsigned long user)
 {
 	auto pThis = new PER_HANDLE_DATA;
 	pThis->hPeer = hSock;
 	memcpy_s(&pThis->peerAddr, sizeof(pThis->peerAddr), pAddr, length);
+	pThis->uUser = user;
 	return pThis;
 }

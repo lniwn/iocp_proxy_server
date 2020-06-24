@@ -6,11 +6,16 @@ class CHttpTunnel : public CIOCPServer
 {
 public:
 	CHttpTunnel();
-	void ProcessBuffer(_PER_IO_DATA* pBuffer);
+	void ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 
 private:
-	int readHeader();
+	ULONG readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 	int readData();
+	void sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* payload);
+	bool extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port);
+	int getHttpProtocol(const char* header, DWORD dwSize);
+
+
 	LPPER_HANDLE_DATA getTunnelHandle(const LPPER_HANDLE_DATA pKey);
 	void putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData);
 	DWORD createTunnelHandle(const SOCKADDR_IN* peerAddr, LPPER_HANDLE_DATA* pData);

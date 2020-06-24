@@ -4,7 +4,7 @@
 #include "framework.h"
 #include <winsock2.h>
 #include "yygame_proxy.h"
-#include "iocp_server.h"
+#include "http_tunnel.h"
 
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -19,8 +19,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     ::WSADATA data;
     ::WSAStartup(MAKEWORD(2, 2), &data);
-    CIOCPServer proxy;
-    proxy.StartServer(1082);
+    CHttpTunnel proxy;
+    proxy.StartServer(5280);
     ::WSACleanup();
 
     return 0;
