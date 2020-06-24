@@ -34,47 +34,19 @@ CHttpTunnel::CHttpTunnel()
 {
 }
 
-void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
+bool CHttpTunnel::handleRecvBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
 {
 	if (pHandleData->uUser == SocketState::ClientSocketAccept)
 	{
-		const char* pBase = pBuffer->buffer;
-		if (pBase != pBuffer->wsaBuffer.buf)
+		int methodIndex = -1;
+		bool bReset = false;
+		if (!handleAcceptBuffer(pHandleData, pBuffer, dwLen, methodIndex, bReset))
 		{
-			assert(pBuffer->wsaBuffer.buf > pBase);
-			dwLen += (pBuffer->wsaBuffer.buf - pBase);
-			assert(dwLen <= HTTPPROXY_BUFFER_LENGTH);
-			if (dwLen > HTTPPROXY_BUFFER_LENGTH)
+			if (bReset)
 			{
 				pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-				sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
-				return;
 			}
-		}
-
-		int methodIndex = getHttpProtocol(pBuffer->buffer, dwLen);
-		if (methodIndex < 0)
-		{
-			pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-			sendHttpResponse(pHandleData, "HTTP/1.1 400 Bad Request\r\n\r\n");
-
-			return;
-		}
-		auto dwHeaderLen = readHeader(pHandleData, pBuffer, dwLen);
-		if (dwHeaderLen == INVALID_HEADER_LEN)
-		{
-			if (dwLen == HTTPPROXY_BUFFER_LENGTH)
-			{
-				// header is too large
-				pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-				sendHttpResponse(pHandleData, "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n");
-			}
-			else
-			{
-				pBuffer->wsaBuffer.buf = &pBuffer->buffer[dwLen];
-				pBuffer->wsaBuffer.len = HTTPPROXY_BUFFER_LENGTH - dwLen;
-			}
-			return;
+			return false;
 		}
 
 		if (methodIndex == CONNECT_INDEX)
@@ -85,51 +57,6 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 		{
 			pHandleData->uUser = SocketState::ClientSocketHttp;
 		}
-
-		std::string host;
-		std::string port;
-		if (!extractHost(pBuffer->buffer, dwHeaderLen, host, port))
-		{
-			pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-			sendHttpResponse(pHandleData, "HTTP/1.1 422 Unprocessable Entity\r\n\r\n");
-			return;
-		}
-
-		addrinfo hints = { 0 };
-		hints.ai_family = AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
-		hints.ai_protocol = IPPROTO_TCP;
-		addrinfo* pResult = NULL;
-		if (GetAddrInfoA(host.c_str(), port.c_str(), &hints, &pResult) == 0)
-		{
-			addrinfo* pCursor = NULL;
-			for (pCursor = pResult; pCursor != NULL; pCursor = pCursor->ai_next)
-			{
-				if (pCursor->ai_family == AF_INET)
-				{
-					break;
-				}
-			}
-			if (pCursor != NULL)
-			{
-				LPPER_HANDLE_DATA pServerHandle = NULL;
-				if (0 == createTunnelHandle(reinterpret_cast<const SOCKADDR_IN*>(pCursor->ai_addr), &pServerHandle))
-				{
-					putTunnelHandle(pHandleData, pServerHandle);
-					if (!PostRecv(pServerHandle, pServerHandle->AcquireBuffer(IO_OPT_TYPE::RECV_POSTED)))
-					{
-						assert(0);
-					}
-				}
-			}
-			FreeAddrInfoA(pResult);
-
-			if (methodIndex == CONNECT_INDEX)
-			{
-				sendHttpResponse(pHandleData, "HTTP/1.1 200 Connection Established\r\n\r\n");
-				return;
-			}
-		}
 	}
 	auto pPeerHandle = getTunnelHandle(pHandleData);
 	if (pPeerHandle != NULL)
@@ -138,14 +65,118 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 		pSendBuffer->SetPayload(pBuffer->buffer, dwLen);
 		if (!PostSend(pPeerHandle, pSendBuffer))
 		{
+			destroyTunnelHandle(pHandleData);
 			assert(0);
+			return false;
 		}
 	}
 	else
 	{
-		PostClose(pHandleData);
+		destroyTunnelHandle(pHandleData);
 		assert(0);
+		return false;
 	}
+	return true;
+}
+
+bool CHttpTunnel::handleAcceptBuffer(LPPER_HANDLE_DATA& pHandleData, LPPER_IO_DATA& pBuffer,
+	DWORD& dwLen, int& methodIndex, bool& bResetBuffer)
+{
+	bResetBuffer = true;
+	const char* pBase = pBuffer->buffer;
+	if (pBase != pBuffer->wsaBuffer.buf)
+	{
+		assert(pBuffer->wsaBuffer.buf > pBase);
+		dwLen += (pBuffer->wsaBuffer.buf - pBase);
+		assert(dwLen <= HTTPPROXY_BUFFER_LENGTH);
+		if (dwLen > HTTPPROXY_BUFFER_LENGTH)
+		{
+			sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
+			return false;
+		}
+	}
+
+	methodIndex = getHttpProtocol(pBuffer->buffer, dwLen);
+	if (methodIndex < 0)
+	{
+		sendHttpResponse(pHandleData, "HTTP/1.1 400 Bad Request\r\n\r\n");
+
+		return false;
+	}
+
+	auto dwHeaderLen = readHeader(pHandleData, pBuffer, dwLen);
+	if (dwHeaderLen == INVALID_HEADER_LEN)
+	{
+		if (dwLen == HTTPPROXY_BUFFER_LENGTH)
+		{
+			// header is too large
+			sendHttpResponse(pHandleData, "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n");
+			return false;
+		}
+		else
+		{
+			pBuffer->wsaBuffer.buf = &pBuffer->buffer[dwLen];
+			pBuffer->wsaBuffer.len = HTTPPROXY_BUFFER_LENGTH - dwLen;
+			bResetBuffer = false;
+			return true;
+		}
+	}
+
+	std::string host;
+	std::string port;
+	if (!extractHost(pBuffer->buffer, dwHeaderLen, host, port))
+	{
+		sendHttpResponse(pHandleData, "HTTP/1.1 422 Unprocessable Entity\r\n\r\n");
+		return false;
+	}
+
+	addrinfo hints = { 0 };
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	addrinfo* pResult = NULL;
+	if (GetAddrInfoA(host.c_str(), port.c_str(), &hints, &pResult) == 0)
+	{
+		addrinfo* pCursor = NULL;
+		for (pCursor = pResult; pCursor != NULL; pCursor = pCursor->ai_next)
+		{
+			if (pCursor->ai_family == AF_INET)
+			{
+				break;
+			}
+		}
+		if (pCursor != NULL)
+		{
+			LPPER_HANDLE_DATA pServerHandle = NULL;
+			if (0 == createTunnelHandle(reinterpret_cast<const SOCKADDR_IN*>(pCursor->ai_addr), &pServerHandle))
+			{
+				putTunnelHandle(pHandleData, pServerHandle);
+				if (!PostRecv(pServerHandle, pServerHandle->AcquireBuffer(IO_OPT_TYPE::RECV_POSTED)))
+				{
+					destroyTunnelHandle(pHandleData);
+					assert(0);
+				}
+			}
+		}
+		FreeAddrInfoA(pResult);
+		if (pCursor == NULL)
+		{
+			sendHttpResponse(pHandleData, "HTTP/1.1 504 Gateway Timeout\r\n\r\n");
+			return false;
+		}
+
+		if (methodIndex == CONNECT_INDEX)
+		{
+			sendHttpResponse(pHandleData, "HTTP/1.1 200 Connection Established\r\n\r\n");
+			return true;
+		}
+	}
+	else
+	{
+		sendHttpResponse(pHandleData, "HTTP/1.1 504 Gateway Timeout\r\n\r\n");
+		return false;
+	}
+	return true;
 }
 
 ULONG CHttpTunnel::readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
@@ -174,6 +205,7 @@ void CHttpTunnel::sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* pa
 	pBuffer->SetPayload(payload, strlen(payload));
 	if (!PostSend(pHandleData, pBuffer))
 	{
+		destroyTunnelHandle(pHandleData);
 		assert(0);
 	}
 }
@@ -323,9 +355,17 @@ void CHttpTunnel::destroyTunnelHandle(LPPER_HANDLE_DATA pKey)
 	removeTunnelHandle(pKey);
 	if (pValue != NULL)
 	{
-		PostClose(pValue);
+		if (!PostClose(pValue))
+		{
+			delete pValue;
+			assert(0);
+		}
 	}
-	PostClose(pKey);
+	if (!PostClose(pKey))
+	{
+		delete pKey;
+		assert(0);
+	}
 }
 
 void CHttpTunnel::removeTunnelHandle(const LPPER_HANDLE_DATA pKey)
@@ -349,7 +389,7 @@ bool CHttpTunnel::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pI
 
 bool CHttpTunnel::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
 {
-	ProcessBuffer(pHandleData, pIoData, dwLen);
+	handleRecvBuffer(pHandleData, pIoData, dwLen);
 	return __super::onRecvPosted(pHandleData, pIoData, dwLen);
 }
 

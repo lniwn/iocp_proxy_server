@@ -6,9 +6,10 @@ class CHttpTunnel : public CIOCPServer
 {
 public:
 	CHttpTunnel();
-	void ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 
 private:
+	bool handleRecvBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
+	bool handleAcceptBuffer(LPPER_HANDLE_DATA& pHandleData, LPPER_IO_DATA& pBuffer, DWORD& dwLen, int& methodIndex, bool& bResetBuffer);
 	ULONG readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 	int readData();
 	void sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* payload);
