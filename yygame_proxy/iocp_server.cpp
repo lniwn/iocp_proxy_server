@@ -202,7 +202,7 @@ void CIOCPServer::iocpWorker()
 		}
 		pIoData = CONTAINING_RECORD(pOverlapped, PER_IO_DATA, overlapped);
 
-		if (dwTransferred == 0 && pIoData->opType != IO_OPT_TYPE::ACCEPT_POSTED)
+		if (dwTransferred == 0 && pIoData->opType == IO_OPT_TYPE::RECV_POSTED)
 		{
 			// ¿Í»§¶Ë¶Ï¿ª
 			onDisconnected(pHandleData);
@@ -222,6 +222,9 @@ void CIOCPServer::iocpWorker()
 			break;
 		case IO_OPT_TYPE::SEND_POSTED:
 			bOk = onSendPosted(pHandleData, pIoData, dwTransferred);
+			break;
+		case IO_OPT_TYPE::CLOSE_POSTED:
+			bOk = onClosePosted(pHandleData);
 			break;
 		case IO_OPT_TYPE::NONE_POSTED:
 		default:
@@ -272,6 +275,12 @@ bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoD
 	return true;
 }
 
+bool CIOCPServer::onClosePosted(LPPER_HANDLE_DATA pHandleData)
+{
+	pHandleData->Destroy();
+	return true;
+}
+
 void CIOCPServer::onServerError(LPPER_HANDLE_DATA, DWORD)
 {
 
@@ -291,6 +300,13 @@ bool CIOCPServer::PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 		return ::WSAGetLastError() == WSA_IO_PENDING;
 	}
 	return true;
+}
+
+bool CIOCPServer::PostClose(LPPER_HANDLE_DATA pHandleData)
+{
+	auto pIoData = pHandleData->AcquireBuffer(IO_OPT_TYPE::CLOSE_POSTED);
+	return FALSE != ::PostQueuedCompletionStatus(m_hIOCP, 0,
+		reinterpret_cast<ULONG_PTR>(pHandleData), &pIoData->overlapped);
 }
 
 HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads)
@@ -386,8 +402,7 @@ _PER_HANDLE_DATA::~_PER_HANDLE_DATA()
 {
 	if (hPeer != INVALID_SOCKET)
 	{
-		::closesocket(hPeer);
-		hPeer = INVALID_SOCKET;
+		Destroy();
 	}
 }
 
@@ -424,6 +439,12 @@ void _PER_HANDLE_DATA::ReleaseBuffer(LPPER_IO_DATA data)
 	{
 		assert(false && static_cast<int>(data->opType));
 	}
+}
+
+void _PER_HANDLE_DATA::Destroy()
+{
+	::closesocket(hPeer);
+	hPeer = INVALID_SOCKET;
 }
 
 LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr,

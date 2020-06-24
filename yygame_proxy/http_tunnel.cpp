@@ -116,7 +116,10 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 				if (0 == createTunnelHandle(reinterpret_cast<const SOCKADDR_IN*>(pCursor->ai_addr), &pServerHandle))
 				{
 					putTunnelHandle(pHandleData, pServerHandle);
-					PostRecv(pServerHandle, pServerHandle->AcquireBuffer(IO_OPT_TYPE::RECV_POSTED));
+					if (!PostRecv(pServerHandle, pServerHandle->AcquireBuffer(IO_OPT_TYPE::RECV_POSTED)))
+					{
+						assert(0);
+					}
 				}
 			}
 			FreeAddrInfoA(pResult);
@@ -133,7 +136,15 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 	{
 		auto pSendBuffer = pPeerHandle->AcquireBuffer(IO_OPT_TYPE::SEND_POSTED);
 		pSendBuffer->SetPayload(pBuffer->buffer, dwLen);
-		PostSend(pPeerHandle, pSendBuffer);
+		if (!PostSend(pPeerHandle, pSendBuffer))
+		{
+			assert(0);
+		}
+	}
+	else
+	{
+		PostClose(pHandleData);
+		assert(0);
 	}
 }
 
@@ -161,7 +172,10 @@ void CHttpTunnel::sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* pa
 {
 	auto pBuffer = pHandleData->AcquireBuffer(IO_OPT_TYPE::SEND_POSTED);
 	pBuffer->SetPayload(payload, strlen(payload));
-	PostSend(pHandleData, pBuffer);
+	if (!PostSend(pHandleData, pBuffer))
+	{
+		assert(0);
+	}
 }
 
 bool CHttpTunnel::extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port)
@@ -302,22 +316,26 @@ DWORD CHttpTunnel::createTunnelHandle(const SOCKADDR_IN* peerAddr, LPPER_HANDLE_
 	return ERROR_SUCCESS;
 }
 
-void CHttpTunnel::destroyTunnelHandle(const LPPER_HANDLE_DATA pKey)
+void CHttpTunnel::destroyTunnelHandle(LPPER_HANDLE_DATA pKey)
 {
+	assert(pKey != NULL);
+	auto pValue = getTunnelHandle(pKey);
 	removeTunnelHandle(pKey);
-	delete pKey;
+	if (pValue != NULL)
+	{
+		PostClose(pValue);
+	}
+	PostClose(pKey);
 }
 
-void CHttpTunnel::removeTunnelHandle(const LPPER_HANDLE_DATA pKey, bool bAll)
+void CHttpTunnel::removeTunnelHandle(const LPPER_HANDLE_DATA pKey)
 {
 	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	if (bAll)
+
+	auto pData = getTunnelHandle(pKey);
+	if (pData != NULL)
 	{
-		auto pData = getTunnelHandle(pKey);
-		if (pData != NULL)
-		{
-			m_tunnelTable.erase(pData);
-		}
+		m_tunnelTable.erase(pData);
 	}
 
 	m_tunnelTable.erase(pKey);
@@ -347,6 +365,11 @@ void CHttpTunnel::onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr)
 
 void CHttpTunnel::onDisconnected(LPPER_HANDLE_DATA pHandleData)
 {
+	auto pValue = getTunnelHandle(pHandleData);
 	removeTunnelHandle(pHandleData);
+	if (pValue != NULL)
+	{
+		destroyTunnelHandle(pValue);
+	}
 	return __super::onDisconnected(pHandleData);
 }
