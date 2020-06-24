@@ -47,7 +47,7 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 			if (dwLen > HTTPPROXY_BUFFER_LENGTH)
 			{
 				pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-				sendHttpResponse(pHandleData, "500 Internal Server Error\r\n\r\n");
+				sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
 				return;
 			}
 		}
@@ -56,7 +56,7 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 		if (methodIndex < 0)
 		{
 			pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-			sendHttpResponse(pHandleData, "400 Bad Request\r\n\r\n");
+			sendHttpResponse(pHandleData, "HTTP/1.1 400 Bad Request\r\n\r\n");
 
 			return;
 		}
@@ -67,7 +67,7 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 			{
 				// header is too large
 				pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-				sendHttpResponse(pHandleData, "431 Request Header Fields Too Large\r\n\r\n");
+				sendHttpResponse(pHandleData, "HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n");
 			}
 			else
 			{
@@ -91,7 +91,7 @@ void CHttpTunnel::ProcessBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBu
 		if (!extractHost(pBuffer->buffer, dwHeaderLen, host, port))
 		{
 			pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-			sendHttpResponse(pHandleData, "422 Unprocessable Entity\r\n\r\n");
+			sendHttpResponse(pHandleData, "HTTP/1.1 422 Unprocessable Entity\r\n\r\n");
 			return;
 		}
 
@@ -236,7 +236,7 @@ bool CHttpTunnel::extractHost(const char* header, DWORD dwSize, std::string& hos
 	else
 	{
 		host = std::move(std::string(pBase, pColon));
-		port = std::move(std::string(pColon, pHostEnd));
+		port = std::move(std::string(pColon + 1, pHostEnd));
 	}
 
 	return true;
