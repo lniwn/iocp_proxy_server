@@ -6,10 +6,30 @@
 #pragma comment(lib, "Ws2_32.lib")
 
 static LPFN_CONNECTEX PtrConnectEx;
-static LPFN_CONNECTEX PtrDisconnectEx;
+static LPFN_DISCONNECTEX PtrDisconnectEx;
+static LPFN_ACCEPTEX PtrAcceptEx;
+static LPFN_GETACCEPTEXSOCKADDRS PtrGetAcceptExSockAddrs;
 
 #define  DEFER_SOCKET(hDummy) \
 	std::shared_ptr<SOCKET> _defer_##hDummy(&hDummy, [](SOCKET* hDelegated) { ::closesocket(*hDelegated); })
+
+
+#include <set>
+static std::set<LPPER_HANDLE_DATA> g_handleDataList;
+std::mutex g_listGuard;
+
+void PutDataList(LPPER_HANDLE_DATA pData)
+{
+	std::lock_guard<std::mutex> _(g_listGuard);
+	g_handleDataList.insert(pData);
+}
+
+void RemoveDataList(LPPER_HANDLE_DATA pData)
+{
+	std::lock_guard<std::mutex> _(g_listGuard);
+	g_handleDataList.erase(pData);
+	assert(g_handleDataList.find(pData) == g_handleDataList.end());
+}
 
 DWORD CIOCPServer::StartServer(unsigned short port)
 {
@@ -32,8 +52,10 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 	}
 
 	// 设置SO_REUSEADDR，防止程序异常退出，重启之后无法绑定对应端口
-	int optReuse = 1;
-	::setsockopt(l, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&optReuse), sizeof(optReuse));
+	//int optReuse = 1;
+	//::setsockopt(l, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&optReuse), sizeof(optReuse));
+	m_pListenContext = PER_HANDLE_DATA::Create(l, reinterpret_cast<const SOCKADDR_STORAGE*>(&addr), sizeof(SOCKADDR_IN));
+	AssociateWithServer(reinterpret_cast<HANDLE>(l), reinterpret_cast<ULONG_PTR>(m_pListenContext), 0);
 
 	if (SOCKET_ERROR == ::bind(l, (const PSOCKADDR)&addr, sizeof(addr)))
 	{
@@ -46,12 +68,10 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 		return ::WSAGetLastError();
 	}
 
-	while (m_bRun)
-	{
-		handleAccept(l);
-	}
+	postAccept(m_pListenContext->recvBuf);
+	postAccept(m_pListenContext->sendBuf);
 
-	::closesocket(l);
+	::WaitForSingleObject(m_hStopEvt, INFINITE);
 
 	uninit();
 
@@ -61,12 +81,18 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 void CIOCPServer::StopServer()
 {
 	m_bRun = false;
+	if (m_hStopEvt != NULL)
+	{
+		::SetEvent(m_hStopEvt);
+	}
 }
 
 CIOCPServer::CIOCPServer()
 {
 	m_bRun = true;
 	m_hIOCP = NULL;
+	m_pListenContext = NULL;
+	m_hStopEvt = NULL;
 }
 
 CIOCPServer::~CIOCPServer()
@@ -95,6 +121,28 @@ DWORD CIOCPServer::init()
 		}
 		assert(PtrConnectEx != NULL);
 	}
+	// AcceptEx
+	{
+		assert(PtrAcceptEx == NULL);
+		GUID id = WSAID_ACCEPTEX;
+		if (SOCKET_ERROR == ::WSAIoctl(hDummy, SIO_GET_EXTENSION_FUNCTION_POINTER, &id,
+			sizeof(id), &PtrAcceptEx, sizeof(PtrAcceptEx), &dwBytes, NULL, NULL))
+		{
+			return ::WSAGetLastError();
+		}
+		assert(PtrAcceptEx != NULL);
+	}
+	// GetAcceptExSockAddrs
+	{
+		assert(PtrGetAcceptExSockAddrs == NULL);
+		GUID id = WSAID_GETACCEPTEXSOCKADDRS;
+		if (SOCKET_ERROR == ::WSAIoctl(hDummy, SIO_GET_EXTENSION_FUNCTION_POINTER, &id,
+			sizeof(id), &PtrGetAcceptExSockAddrs, sizeof(PtrGetAcceptExSockAddrs), &dwBytes, NULL, NULL))
+		{
+			return ::WSAGetLastError();
+		}
+		assert(PtrGetAcceptExSockAddrs != NULL);
+	}
 
 	m_hIOCP = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, 0);
 	SYSTEM_INFO sysInfo = { 0 };
@@ -106,11 +154,19 @@ DWORD CIOCPServer::init()
 		m_workers.push_back(worker);
 	}
 
+	m_hStopEvt = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+
 	return ERROR_SUCCESS;
 }
 
 void CIOCPServer::uninit()
 {
+	if (m_pListenContext != NULL)
+	{
+		delete m_pListenContext;
+		m_pListenContext = NULL;
+	}
+
 	BOOL bPostOk = TRUE;
 	for (size_t i = 0; bPostOk && i < m_workers.size(); i++)
 	{
@@ -138,36 +194,54 @@ void CIOCPServer::uninit()
 		m_hIOCP = NULL;
 	}
 
+	if (m_hStopEvt != NULL)
+	{
+		::CloseHandle(m_hStopEvt);
+		m_hStopEvt = NULL;
+	}
+
 }
 
-void CIOCPServer::handleAccept(SOCKET hListen)
+bool CIOCPServer::handleAccept(LPPER_IO_DATA pIoData, LPPER_HANDLE_DATA* ppAcceptSockData, LPPER_IO_DATA* ppAcceptIoData)
 {
-	SOCKADDR_IN clientAddr = { 0 };
-	int addrLen = sizeof(clientAddr);
-	SOCKET hClient = ::WSAAccept(hListen, (PSOCKADDR)&clientAddr, &addrLen, NULL, NULL);
-	if (hClient == INVALID_SOCKET)
-	{
-		assert(0);
-		return;
-	}
+	::setsockopt(pIoData->hAccept, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
+		reinterpret_cast<const char*>(&m_pListenContext->hPeer),
+		sizeof(m_pListenContext->hPeer));
 
-	auto fnLambda = new std::function<void()>(
-		[=]() {
-			LPPER_HANDLE_DATA pHandleData = PER_HANDLE_DATA::Create(hClient,
-				reinterpret_cast<const SOCKADDR_STORAGE*>(&clientAddr), addrLen);
+	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
+	SOCKADDR_IN* remoteAddr = NULL, * localAddr = NULL;
+	int remoteLen = sizeof(SOCKADDR_IN);
+	int localLen = sizeof(SOCKADDR_IN);
+	PtrGetAcceptExSockAddrs(pIoData->wsaBuffer.buf,
+		pIoData->wsaBuffer.len - (AddrLength * 2),
+		AddrLength,
+		AddrLength,
+		reinterpret_cast<LPSOCKADDR*>(&localAddr),
+		&localLen,
+		reinterpret_cast<LPSOCKADDR*>(&remoteAddr),
+		&remoteLen);
 
-			::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pHandleData->hPeer), m_hIOCP, reinterpret_cast<ULONG_PTR>(pHandleData), 0);
+	auto pAcceptData = PER_HANDLE_DATA::Create(pIoData->hAccept,
+		reinterpret_cast<const SOCKADDR_STORAGE*>(remoteAddr), remoteLen);
+	auto pAcceptIoData = pAcceptData->recvBuf;
+	pAcceptIoData->Reset(IO_OPT_TYPE::ACCEPT_POSTED);
 
-			auto pIoData = pHandleData->AcquireBuffer(IO_OPT_TYPE::ACCEPT_POSTED);
-			::PostQueuedCompletionStatus(m_hIOCP, 0, reinterpret_cast<ULONG_PTR>(pHandleData), &pIoData->overlapped);
+	memcpy_s(pAcceptIoData->buffer, HTTPPROXY_BUFFER_LENGTH, pIoData->buffer, HTTPPROXY_BUFFER_LENGTH);
+	pAcceptIoData->hAccept = pIoData->hAccept;
 
-		});
+	::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pAcceptIoData->hAccept), m_hIOCP, reinterpret_cast<ULONG_PTR>(pAcceptData), 0);
 
-	if (!::QueueUserWorkItem(associateWithIOCP, reinterpret_cast<PVOID>(fnLambda), WT_EXECUTEDEFAULT))
-	{
-		::closesocket(hClient);
-		assert(0);
-	}
+	postAccept(pIoData);
+	//if (!::QueueUserWorkItem(workforAccepted, this, WT_EXECUTEDEFAULT))
+	//{
+	//	postAccept();
+	//	assert(0);
+	//}
+
+	*ppAcceptSockData = pAcceptData;
+	*ppAcceptIoData = pAcceptIoData;
+
+	return true;
 }
 
 void CIOCPServer::iocpWorker()
@@ -183,10 +257,11 @@ void CIOCPServer::iocpWorker()
 
 		BOOL bResult = ::GetQueuedCompletionStatus(m_hIOCP, &dwTransferred,
 			reinterpret_cast<PULONG_PTR>(&pHandleData), &pOverlapped, INFINITE);
+		pIoData = CONTAINING_RECORD(pOverlapped, PER_IO_DATA, overlapped);
 		if (!bResult)
 		{
 			// 异常
-			if (!handleError(pHandleData, ::GetLastError()))
+			if (!handleError(pHandleData, pIoData, ::GetLastError()))
 			{
 				break;
 			}
@@ -200,14 +275,12 @@ void CIOCPServer::iocpWorker()
 			// 退出通知
 			break;
 		}
-		pIoData = CONTAINING_RECORD(pOverlapped, PER_IO_DATA, overlapped);
 
-		if (dwTransferred == 0 && pIoData->opType == IO_OPT_TYPE::RECV_POSTED)
+		if (dwTransferred == 0
+			&& (pIoData->opType == IO_OPT_TYPE::RECV_POSTED || pIoData->opType == IO_OPT_TYPE::SEND_POSTED))
 		{
 			// 客户端断开
-			onDisconnected(pHandleData);
-			delete pHandleData;
-			pHandleData = NULL;
+			onDisconnected(pHandleData, pIoData);
 			continue;
 		}
 
@@ -215,16 +288,25 @@ void CIOCPServer::iocpWorker()
 		switch (pIoData->opType)
 		{
 		case IO_OPT_TYPE::ACCEPT_POSTED:
-			bOk = onAcceptPosted(pHandleData, pIoData);
-			break;
+		{
+			assert(pHandleData == m_pListenContext);
+			LPPER_HANDLE_DATA pAcceptSock = NULL;
+			LPPER_IO_DATA pAcceptIo = NULL;
+			if (handleAccept(pIoData, &pAcceptSock, &pAcceptIo))
+			{
+				bOk = onAcceptPosted(pAcceptSock, pAcceptIo, dwTransferred);
+			}
+			else
+			{
+				assert(0);
+			}
+		}
+		break;
 		case IO_OPT_TYPE::RECV_POSTED:
 			bOk = onRecvPosted(pHandleData, pIoData, dwTransferred);
 			break;
 		case IO_OPT_TYPE::SEND_POSTED:
 			bOk = onSendPosted(pHandleData, pIoData, dwTransferred);
-			break;
-		case IO_OPT_TYPE::CLOSE_POSTED:
-			bOk = onClosePosted(pHandleData);
 			break;
 		case IO_OPT_TYPE::NONE_POSTED:
 		default:
@@ -233,28 +315,23 @@ void CIOCPServer::iocpWorker()
 		}
 		if (!bOk)
 		{
-			::OutputDebugString(L"process IO_OPT_TYPE error");
+			::OutputDebugString(L"process IO_OPT_TYPE error\n");
 		}
 	}
 
 	assert(pHandleData == NULL);
 }
 
-bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
+bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
 {
-	// recv与accept公用一个PER_IO_DATA
+	assert(pHandleData->recvBuf == pIoData);
 	pIoData->Reset(IO_OPT_TYPE::RECV_POSTED);
-	if (!PostRecv(pHandleData, pIoData))
-	{
-		return false;
-	}
-	// 预先创建发送缓冲区
-	pHandleData->ReleaseBuffer(pHandleData->AcquireBuffer(IO_OPT_TYPE::SEND_POSTED));
-	return true;
+	return PostRecv(pHandleData, pIoData);
 }
 
 bool CIOCPServer::PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
+	assert(pHandleData->recvBuf == pIoData);
 	pIoData->opType = IO_OPT_TYPE::RECV_POSTED;
 	DWORD dwFlag = 0;
 	if (::WSARecv(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, &dwFlag, &pIoData->overlapped, NULL) != 0)
@@ -264,20 +341,16 @@ bool CIOCPServer::PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 	return true;
 }
 
-bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
+bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
 {
+	assert(pHandleData->recvBuf == pIoData);
 	return PostRecv(pHandleData, pIoData);
 }
 
 bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
 {
-	pHandleData->ReleaseBuffer(pIoData);
-	return true;
-}
-
-bool CIOCPServer::onClosePosted(LPPER_HANDLE_DATA pHandleData)
-{
-	pHandleData->Destroy();
+	assert(pHandleData->sendBuf == pIoData);
+	pIoData->Reset(IO_OPT_TYPE::SEND_POSTED);
 	return true;
 }
 
@@ -286,13 +359,13 @@ void CIOCPServer::onServerError(LPPER_HANDLE_DATA, DWORD)
 
 }
 
-void CIOCPServer::onDisconnected(LPPER_HANDLE_DATA)
+void CIOCPServer::onDisconnected(LPPER_HANDLE_DATA, LPPER_IO_DATA)
 {
-
 }
 
 bool CIOCPServer::PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 {
+	assert(pIoData == pHandleData->sendBuf);
 	pIoData->opType = IO_OPT_TYPE::SEND_POSTED;
 	DWORD dwFlag = 0;
 	if (::WSASend(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, dwFlag, &pIoData->overlapped, NULL) != 0)
@@ -302,11 +375,24 @@ bool CIOCPServer::PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
 	return true;
 }
 
-bool CIOCPServer::PostClose(LPPER_HANDLE_DATA pHandleData)
+bool CIOCPServer::postAccept(LPPER_IO_DATA pIoData)
 {
-	auto pIoData = pHandleData->AcquireBuffer(IO_OPT_TYPE::CLOSE_POSTED);
-	return FALSE != ::PostQueuedCompletionStatus(m_hIOCP, 0,
-		reinterpret_cast<ULONG_PTR>(pHandleData), &pIoData->overlapped);
+	assert(pIoData == m_pListenContext->recvBuf || pIoData == m_pListenContext->sendBuf);
+	pIoData->Reset(IO_OPT_TYPE::ACCEPT_POSTED);
+
+	SOCKET hClient = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (INVALID_SOCKET == hClient)
+	{
+		return false;
+	}
+	pIoData->hAccept = hClient;
+	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
+	return TRUE == PtrAcceptEx(m_pListenContext->hPeer, hClient, pIoData->wsaBuffer.buf,
+		pIoData->wsaBuffer.len - (AddrLength * 2),
+		AddrLength,
+		AddrLength,
+		NULL,
+		&pIoData->overlapped);
 }
 
 HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads)
@@ -314,7 +400,7 @@ HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, D
 	return ::CreateIoCompletionPort(hFile, m_hIOCP, CompletionKey, NumberOfConcurrentThreads);
 }
 
-bool CIOCPServer::handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr)
+bool CIOCPServer::handleError(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwErr)
 {
 	bool bResult = false;
 	switch (dwErr)
@@ -347,16 +433,13 @@ bool CIOCPServer::handleError(LPPER_HANDLE_DATA& pHandleData, DWORD dwErr)
 	}
 
 	onServerError(pHandleData, dwErr);
+	assert(pIoData != NULL);
 	delete pHandleData;
-	pHandleData = NULL;
 	return bResult;
 }
 
-DWORD WINAPI CIOCPServer::associateWithIOCP(_In_ LPVOID lpParameter)
+DWORD WINAPI CIOCPServer::workforAccepted(_In_ LPVOID lpParameter)
 {
-	auto fnLambda = reinterpret_cast<std::function<void()>*>(lpParameter);
-	(*fnLambda)();
-	delete fnLambda;
 	return 0;
 }
 
@@ -371,6 +454,7 @@ void _PER_IO_DATA::Reset(IO_OPT_TYPE opType)
 	wsaBuffer.buf = buffer;
 	wsaBuffer.len = HTTPPROXY_BUFFER_LENGTH;
 	this->opType = opType;
+	this->hAccept = INVALID_SOCKET;
 }
 
 bool _PER_IO_DATA::SetPayload(const char* src, size_t length)
@@ -395,6 +479,8 @@ _PER_HANDLE_DATA::_PER_HANDLE_DATA()
 {
 	hPeer = INVALID_SOCKET;
 	uUser = 0UL;
+	recvBuf = new PER_IO_DATA(IO_OPT_TYPE::NONE_POSTED);
+	sendBuf = new PER_IO_DATA(IO_OPT_TYPE::NONE_POSTED);
 	::ZeroMemory(&peerAddr, sizeof(SOCKADDR_STORAGE));
 }
 
@@ -402,49 +488,17 @@ _PER_HANDLE_DATA::~_PER_HANDLE_DATA()
 {
 	if (hPeer != INVALID_SOCKET)
 	{
-		Destroy();
+		::closesocket(hPeer);
+		hPeer = INVALID_SOCKET;
 	}
+	delete recvBuf;
+	delete sendBuf;
+	RemoveDataList(this);
 }
 
-LPPER_IO_DATA _PER_HANDLE_DATA::AcquireBuffer(IO_OPT_TYPE bufferType)
+void _PER_HANDLE_DATA::Close()
 {
-	std::lock_guard<std::mutex> guard(ioGuard);
-	if (!freeIoList.empty())
-	{
-		auto data = freeIoList.back();
-		freeIoList.pop_back();
-		usedIoList.insert({ reinterpret_cast<ULONG_PTR>(data.get()), data });
-
-		data->Reset(bufferType);
-		return data.get();
-	}
-	else
-	{
-		auto data = std::make_shared<PER_IO_DATA>(bufferType);
-		usedIoList.insert({ reinterpret_cast<ULONG_PTR>(data.get()), data });
-		return data.get();
-	}
-}
-
-void _PER_HANDLE_DATA::ReleaseBuffer(LPPER_IO_DATA data)
-{
-	std::lock_guard<std::mutex> guard(ioGuard);
-	auto itUsed = usedIoList.find(reinterpret_cast<ULONG_PTR>(data));
-	if (itUsed != usedIoList.end())
-	{
-		freeIoList.push_back(itUsed->second);
-		usedIoList.erase(itUsed);
-	}
-	else
-	{
-		assert(false && static_cast<int>(data->opType));
-	}
-}
-
-void _PER_HANDLE_DATA::Destroy()
-{
-	::closesocket(hPeer);
-	hPeer = INVALID_SOCKET;
+	::shutdown(hPeer, SD_BOTH);
 }
 
 LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr,
@@ -454,5 +508,6 @@ LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE*
 	pThis->hPeer = hSock;
 	memcpy_s(&pThis->peerAddr, sizeof(pThis->peerAddr), pAddr, length);
 	pThis->uUser = user;
+	PutDataList(pThis);
 	return pThis;
 }

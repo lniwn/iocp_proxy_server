@@ -9,7 +9,7 @@ public:
 
 private:
 	bool handleRecvBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
-	bool handleAcceptBuffer(LPPER_HANDLE_DATA& pHandleData, LPPER_IO_DATA& pBuffer, DWORD& dwLen, int& methodIndex, bool& bResetBuffer);
+	bool handleAcceptBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 	ULONG readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
 	int readData();
 	void sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* payload);
@@ -24,7 +24,7 @@ private:
 	void removeTunnelHandle(const LPPER_HANDLE_DATA pKey);
 
 protected:
-	bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData) override;
+	bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen) override;
 
 
 	bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen) override;
@@ -36,7 +36,7 @@ protected:
 	void onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr) override;
 
 
-	void onDisconnected(LPPER_HANDLE_DATA pHandleData) override;
+	void onDisconnected(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData) override;
 
 private:
 	std::map<LPPER_HANDLE_DATA, LPPER_HANDLE_DATA> m_tunnelTable;
