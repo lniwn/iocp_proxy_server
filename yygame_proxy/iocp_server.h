@@ -86,7 +86,6 @@ private:
 	void iocpWorker();
 	bool handleError(LPIOContext pIoCtx, DWORD dwErr);
 	void handleDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx);
-	static DWORD WINAPI workforAccepted(_In_ LPVOID lpParameter);
 	LPSocketContext prepareSocket();
 	void deleteSocket(LPSocketContext pCtx);
 	void clearSockets();

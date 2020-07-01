@@ -39,8 +39,8 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 	{
 		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 400 Bad Request\r\n\r\n"))
 		{
-			CloseIoSocket(pSocketCtx->GetServerToUserContext());
 			assert(0);
+			CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}
@@ -69,8 +69,8 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 	{
 		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 422 Unprocessable Entity\r\n\r\n"))
 		{
-			CloseIoSocket(pSocketCtx->GetServerToUserContext());
 			assert(0);
+			CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}
@@ -126,7 +126,6 @@ ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD dwLen)
 	{
 		return pHeaderEnd - pBase + 4;
 	}
-	return INVALID_HEADER_LEN;
 }
 
 bool CHttpTunnel::sendHttpResponse(LPIOContext pIoCtx, const char* payload)

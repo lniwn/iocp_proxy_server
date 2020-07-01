@@ -252,6 +252,12 @@ void CIOCPServer::iocpWorker()
 
 		BOOL bResult = ::GetQueuedCompletionStatus(m_hIOCP, &dwTransferred,
 			reinterpret_cast<PULONG_PTR>(&pSocketCtx), &pOverlapped, INFINITE);
+		if (pOverlapped == NULL)
+		{
+			// 退出通知
+			break;
+		}
+		pIoCtx = CONTAINING_RECORD(pOverlapped, IOContext, overlapped);
 		if (!bResult)
 		{
 			// 异常
@@ -265,12 +271,6 @@ void CIOCPServer::iocpWorker()
 				continue;
 			}
 		}
-		if (pOverlapped == NULL)
-		{
-			// 退出通知
-			break;
-		}
-		pIoCtx = CONTAINING_RECORD(pOverlapped, IOContext, overlapped);
 		if (pSocketCtx == NULL)
 		{
 			// 从listen socket 过来的连接
@@ -279,7 +279,7 @@ void CIOCPServer::iocpWorker()
 		}
 
 		if (dwTransferred == 0
-			&& (pIoCtx->opType == IO_OPT_TYPE::RECV_POSTED || pIoCtx->opType == IO_OPT_TYPE::SEND_POSTED))
+			&& (pIoCtx->opType != IO_OPT_TYPE::ACCEPT_POSTED))
 		{
 			// 客户端断开
 			handleDisconnected(pSocketCtx, pIoCtx);
@@ -451,11 +451,6 @@ void CIOCPServer::handleDisconnected(LPSocketContext pSocketCtx, LPIOContext pIo
 	CloseIoSocket(pIoCtx);
 }
 
-DWORD WINAPI CIOCPServer::workforAccepted(_In_ LPVOID lpParameter)
-{
-	return 0;
-}
-
 IOContext::IOContext(SocketContext* pSocketCtx, SOCKET& inSocket, SOCKET& outSocket)
 	: hInSocket(inSocket), hOutSocket(outSocket)
 {
@@ -478,6 +473,7 @@ bool IOContext::SetPayload(const char* src, DWORD dwLen)
 bool IOContext::PostSend(DWORD dwLength)
 {
 	assert(hOutSocket != INVALID_SOCKET && hOutSocket != NULL);
+	assert(dwLength != 0);
 
 	this->opType = IO_OPT_TYPE::SEND_POSTED;
 	DWORD dwFlag = 0;
