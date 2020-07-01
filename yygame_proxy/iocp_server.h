@@ -11,36 +11,61 @@ enum class IO_OPT_TYPE
 	SEND_POSTED,
 };
 
-typedef struct _PER_IO_DATA
+class SocketContext;
+
+class IOContext
 {
-	OVERLAPPED overlapped;
-	WSABUF wsaBuffer;
+public:
+	IOContext(SocketContext *pSocketCtx, SOCKET& inSocket, SOCKET& outSocket);
+	void ResetBuffer();
+	bool SetPayload(const char* src, DWORD dwLen);
+	bool PostSend(DWORD dwLength);
+	bool PostRecv();
+	void Close();
+	SocketContext* GetSocketContext();
+
+public:
+	WSAOVERLAPPED overlapped;
 	char buffer[HTTPPROXY_BUFFER_LENGTH + 1];
 	IO_OPT_TYPE opType;
-	SOCKET hAccept;
-
-	explicit _PER_IO_DATA(IO_OPT_TYPE);
-	void Reset(IO_OPT_TYPE optType = IO_OPT_TYPE::NONE_POSTED);
-	bool SetPayload(const char* src, size_t length);
-} PER_IO_DATA, * LPPER_IO_DATA;
-
-typedef struct _PER_HANDLE_DATA
-{
-	SOCKET hPeer;
-	SOCKADDR_STORAGE peerAddr;
-	std::atomic_ulong uUser;
-	PER_IO_DATA *sendBuf;
-	PER_IO_DATA *recvBuf;
-
-	void Close();
-	static _PER_HANDLE_DATA* Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr,
-		size_t length, unsigned long user = 0UL);
-	~_PER_HANDLE_DATA();
 
 private:
-	_PER_HANDLE_DATA();
+	SocketContext* pSocketCtx;
+	SOCKET& hInSocket;
+	SOCKET& hOutSocket;
+};
+typedef IOContext *LPIOContext;
 
-} PER_HANDLE_DATA, * LPPER_HANDLE_DATA;
+class SocketContext
+{
+public:
+	bool Init(HANDLE hIocp);
+	bool Close(LPIOContext pIO);
+	bool PostAccept(SOCKET hListen);
+	bool CompleteAccept(SOCKET hListen, const SOCKADDR_IN *addr);
+
+	LPIOContext GetUserToServerContext();
+	LPIOContext GetServerToUserContext();
+
+	unsigned long GetCustomData() const;
+	void SetCustomData(unsigned long x);
+
+	~SocketContext();
+	SocketContext();
+
+private:
+	void close();
+
+private:
+	SOCKET userSocket;
+	SOCKET serverSocket;
+
+	IOContext usr2SrvCtx;
+	IOContext srv2UsrCtx;
+	std::atomic_int connCount;
+	std::atomic_ulong data;
+};
+typedef SocketContext *LPSocketContext;
 
 class CIOCPServer
 {
@@ -48,9 +73,8 @@ public:
 	DWORD StartServer(unsigned short port);
 	void StopServer();
 
-	bool PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
-	bool PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
 	HANDLE AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads);
+	void CloseIoSocket(LPIOContext pIo);
 
 	CIOCPServer();
 	virtual ~CIOCPServer();
@@ -58,23 +82,29 @@ public:
 private:
 	DWORD init();
 	void uninit();
-	bool handleAccept(LPPER_IO_DATA pIoData, LPPER_HANDLE_DATA *ppAcceptSockData, LPPER_IO_DATA *ppAcceptIoData);
+	bool handleAccept(LPIOContext pIoCtx, DWORD dwBytesRecv);
 	void iocpWorker();
-	bool handleError(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwErr);
+	bool handleError(LPIOContext pIoCtx, DWORD dwErr);
+	void handleDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx);
 	static DWORD WINAPI workforAccepted(_In_ LPVOID lpParameter);
-	bool postAccept(LPPER_IO_DATA pIoData);
+	LPSocketContext prepareSocket();
+	void deleteSocket(LPSocketContext pCtx);
+	void clearSockets();
 
 protected:
-	virtual bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
-	virtual bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
-	virtual bool onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen);
-	virtual void onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr);
-	virtual void onDisconnected(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData);
+	virtual bool onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen, SOCKADDR_IN* peerAddr);
+	virtual bool onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen, bool success);
+	virtual bool onRecvPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen);
+	virtual bool onSendPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen);
+	virtual void onServerError(LPIOContext pIoCtx, DWORD dwErr);
+	virtual void onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx);
 
 private:
 	HANDLE m_hIOCP;
 	std::vector<std::shared_ptr<std::thread>> m_workers;
+	std::set<LPSocketContext> m_connTable;
+	std::recursive_mutex m_connTableGuard;
 	std::atomic_bool m_bRun;
-	LPPER_HANDLE_DATA m_pListenContext;
+	SOCKET m_hListenSocket;
 	HANDLE m_hStopEvt;
 };

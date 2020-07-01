@@ -8,38 +8,22 @@ public:
 	CHttpTunnel();
 
 private:
-	bool handleRecvBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
-	bool handleAcceptBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
-	ULONG readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen);
-	int readData();
-	void sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* payload);
+	bool handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
+		SOCKADDR_IN* peerAddr);
+	ULONG readHeader(LPIOContext pIoCtx, DWORD dwLen);
+	bool sendHttpResponse(LPIOContext pIoCtx, const char* payload);
 	bool extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port);
 	int getHttpProtocol(const char* header, DWORD dwSize);
 
-
-	LPPER_HANDLE_DATA getTunnelHandle(const LPPER_HANDLE_DATA pKey);
-	void putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData);
-	DWORD createTunnelHandle(const SOCKADDR_IN* peerAddr, LPPER_HANDLE_DATA* pData);
-	void destroyTunnelHandle(LPPER_HANDLE_DATA pKey);
-	void removeTunnelHandle(const LPPER_HANDLE_DATA pKey);
-
 protected:
-	bool onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen) override;
-
-
-	bool onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen) override;
-
-
-	bool onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen) override;
-
-
-	void onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr) override;
-
-
-	void onDisconnected(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData) override;
+	virtual bool onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
+		SOCKADDR_IN* peerAddr) override;
+	virtual bool onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen, bool success) override;
+	virtual bool onRecvPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen) override;
+	virtual bool onSendPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen) override;
+	virtual void onServerError(LPIOContext pIoCtx, DWORD dwErr) override;
+	virtual void onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx) override;
 
 private:
-	std::map<LPPER_HANDLE_DATA, LPPER_HANDLE_DATA> m_tunnelTable;
 	std::map<std::string, ULONG> m_dnsCache; // domain ip
-	std::recursive_mutex m_tunnelGuard;
 };

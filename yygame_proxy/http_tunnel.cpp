@@ -20,65 +20,31 @@ static constexpr const char* HTTP_METHODS[] = {
 		"PATCH",
 };
 
-enum SocketState : unsigned long
-{
-	ClientSocketTunnel = 1, // 客户端HTTP隧道
-	ClientSocketHttp = 2, // 客户端普通HTTP协议
-	ServerSocket = 100, // 远程服务端
-};
-
 static constexpr int CONNECT_INDEX = 2; // CONNECT方法索引位置
+
+static constexpr unsigned long PlanHttpProxy = 1;
+static constexpr unsigned long TunnelHttpProxy = 2;
 
 CHttpTunnel::CHttpTunnel()
 {
 }
 
-bool CHttpTunnel::handleRecvBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
+bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
+	SOCKADDR_IN* peerAddr)
 {
-	auto pPeerHandle = getTunnelHandle(pHandleData);
-	if (pPeerHandle != NULL)
-	{
-		auto pSendBuffer = pPeerHandle->sendBuf;
-		pSendBuffer->SetPayload(pBuffer->buffer, dwLen);
-		if (!PostSend(pPeerHandle, pSendBuffer))
-		{
-			assert(0);
-			return false;
-		}
-	}
-	else
-	{
-		sendHttpResponse(pHandleData, "HTTP/1.1 504 Gateway Timeout\r\n\r\n");
-		return false;
-	}
-	return true;
-}
+	//sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
 
-bool CHttpTunnel::handleAcceptBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
-{
-	const char* pBase = pBuffer->buffer;
-	if (pBase != pBuffer->wsaBuffer.buf)
-	{
-		assert(pBuffer->wsaBuffer.buf > pBase);
-		dwLen += (pBuffer->wsaBuffer.buf - pBase);
-		assert(dwLen <= HTTPPROXY_BUFFER_LENGTH);
-		if (dwLen > HTTPPROXY_BUFFER_LENGTH)
-		{
-			pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-			sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
-			return false;
-		}
-	}
-
-	int methodIndex = getHttpProtocol(pBuffer->buffer, dwLen);
+	int methodIndex = getHttpProtocol(pIoCtx->buffer, dwLen);
 	if (methodIndex < 0)
 	{
-		pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-		sendHttpResponse(pHandleData, "HTTP/1.1 400 Bad Request\r\n\r\n");
-
+		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 400 Bad Request\r\n\r\n"))
+		{
+			CloseIoSocket(pSocketCtx->GetServerToUserContext());
+			assert(0);
+		}
 		return false;
 	}
-	auto dwHeaderLen = readHeader(pHandleData, pBuffer, dwLen);
+	auto dwHeaderLen = readHeader(pIoCtx, dwLen);
 	if (dwHeaderLen == INVALID_HEADER_LEN)
 	{
 		dwHeaderLen = dwLen;
@@ -97,21 +63,15 @@ bool CHttpTunnel::handleAcceptBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DAT
 		//}
 	}
 
-	if (methodIndex == CONNECT_INDEX)
-	{
-		pHandleData->uUser = SocketState::ClientSocketTunnel;
-	}
-	else
-	{
-		pHandleData->uUser = SocketState::ClientSocketHttp;
-	}
-
 	std::string host;
 	std::string port;
-	if (!extractHost(pBuffer->buffer, dwHeaderLen, host, port))
+	if (!extractHost(pIoCtx->buffer, dwHeaderLen, host, port))
 	{
-		pBuffer->Reset(IO_OPT_TYPE::RECV_POSTED);
-		sendHttpResponse(pHandleData, "HTTP/1.1 422 Unprocessable Entity\r\n\r\n");
+		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 422 Unprocessable Entity\r\n\r\n"))
+		{
+			CloseIoSocket(pSocketCtx->GetServerToUserContext());
+			assert(0);
+		}
 		return false;
 	}
 
@@ -130,35 +90,33 @@ bool CHttpTunnel::handleAcceptBuffer(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DAT
 				break;
 			}
 		}
-		if (pCursor != NULL)
+		bool bFind = (pCursor != NULL);
+		if (bFind)
 		{
-			LPPER_HANDLE_DATA pServerHandle = NULL;
-			if (0 == createTunnelHandle(reinterpret_cast<const SOCKADDR_IN*>(pCursor->ai_addr), &pServerHandle)
-				&& pServerHandle != NULL)
-			{
-				putTunnelHandle(pHandleData, pServerHandle);
-				pServerHandle->recvBuf->Reset(IO_OPT_TYPE::RECV_POSTED);
-				if (!PostRecv(pServerHandle, pServerHandle->recvBuf))
-				{
-					destroyTunnelHandle(pServerHandle);
-					return false;
-				}
-			}
+			assert(sizeof(SOCKADDR_IN) == pCursor->ai_addrlen);
+			memcpy_s(peerAddr, sizeof(SOCKADDR_IN), pCursor->ai_addr, pCursor->ai_addrlen);
 		}
 		FreeAddrInfoA(pResult);
 
 		if (methodIndex == CONNECT_INDEX)
 		{
-			sendHttpResponse(pHandleData, "HTTP/1.1 200 Connection Established\r\n\r\n");
-			return false;
+			pSocketCtx->SetCustomData(TunnelHttpProxy);
 		}
+		else
+		{
+			pSocketCtx->SetCustomData(PlanHttpProxy);
+		}
+		return bFind;
 	}
-	return true;
+	else
+	{
+		return false;
+	}
 }
 
-ULONG CHttpTunnel::readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuffer, DWORD dwLen)
+ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD dwLen)
 {
-	const char* pBase = pBuffer->buffer;
+	const char* pBase = pIoCtx->buffer;
 	auto pHeaderEnd = StrStrA(pBase, "\r\n\r\n");
 	if (pHeaderEnd == NULL)
 	{
@@ -171,20 +129,12 @@ ULONG CHttpTunnel::readHeader(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pBuff
 	return INVALID_HEADER_LEN;
 }
 
-int CHttpTunnel::readData()
+bool CHttpTunnel::sendHttpResponse(LPIOContext pIoCtx, const char* payload)
 {
-	return 0;
-}
-
-void CHttpTunnel::sendHttpResponse(LPPER_HANDLE_DATA pHandleData, const char* payload)
-{
-	auto pBuffer = pHandleData->sendBuf;
-	pBuffer->SetPayload(payload, strlen(payload));
-	if (!PostSend(pHandleData, pBuffer))
-	{
-		destroyTunnelHandle(pHandleData);
-		assert(0);
-	}
+	DWORD dwLen = strlen(payload);
+	pIoCtx->ResetBuffer();
+	pIoCtx->SetPayload(payload, dwLen);
+	return pIoCtx->PostSend(dwLen);
 }
 
 bool CHttpTunnel::extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port)
@@ -268,164 +218,42 @@ int CHttpTunnel::getHttpProtocol(const char* header, DWORD dwSize)
 	return -1;
 }
 
-LPPER_HANDLE_DATA CHttpTunnel::getTunnelHandle(const LPPER_HANDLE_DATA pKey)
+bool CHttpTunnel::onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
+	SOCKADDR_IN* peerAddr)
 {
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	auto itTarget = m_tunnelTable.find(pKey);
-	if (itTarget == m_tunnelTable.end())
+	return handleAcceptBuffer(pSocketCtx, pIoCtx, dwLen, peerAddr);
+}
+
+bool CHttpTunnel::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen, bool success)
+{
+	if (pSocketCtx->GetCustomData() == TunnelHttpProxy)
 	{
-		return NULL;
+		return sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 200 Connection Established\r\n\r\n")
+			&& pSocketCtx->GetUserToServerContext()->PostRecv();
 	}
 	else
 	{
-		return itTarget->second;
+		assert(pSocketCtx->GetCustomData() == PlanHttpProxy);
+		return __super::onServerConnectPosted(pSocketCtx, dwLen, success);
 	}
 }
 
-void CHttpTunnel::putTunnelHandle(const LPPER_HANDLE_DATA pKey, const LPPER_HANDLE_DATA pData)
+bool CHttpTunnel::onRecvPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen)
 {
-	assert(pKey != NULL);
-	assert(pData != NULL);
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-	if (pKey != NULL)
-	{
-		m_tunnelTable[pKey] = pData;
-	}
-	if (pData != NULL)
-	{
-		m_tunnelTable[pData] = pKey;
-	}
+	return __super::onRecvPosted(pSocketCtx, pIoCtx, dwLen);
 }
 
-DWORD CHttpTunnel::createTunnelHandle(const SOCKADDR_IN* peerAddr, LPPER_HANDLE_DATA* pData)
+bool CHttpTunnel::onSendPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen)
 {
-	SOCKET hSocket = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (hSocket == INVALID_SOCKET)
-	{
-		assert(0);
-		return ::WSAGetLastError();
-	}
-
-	if (0 != ::WSAConnect(hSocket, reinterpret_cast<const sockaddr*>(peerAddr), sizeof(SOCKADDR_IN),
-		NULL, NULL, NULL, NULL))
-	{
-		::closesocket(hSocket);
-		return ::WSAGetLastError();
-	}
-
-	*pData = PER_HANDLE_DATA::Create(hSocket, reinterpret_cast<const SOCKADDR_STORAGE*>(peerAddr),
-		sizeof(SOCKADDR_IN), SocketState::ServerSocket);
-
-	if (NULL == this->AssociateWithServer(reinterpret_cast<HANDLE>(hSocket), reinterpret_cast<ULONG_PTR>(*pData), 0))
-	{
-		assert(0);
-		delete (*pData);
-		*pData = NULL;
-		return ::WSAGetLastError();
-	}
-
-	return ERROR_SUCCESS;
+	return __super::onSendPosted(pSocketCtx, pIoCtx, dwLen);
 }
 
-void CHttpTunnel::destroyTunnelHandle(LPPER_HANDLE_DATA pKey)
+void CHttpTunnel::onServerError(LPIOContext pIoCtx, DWORD dwErr)
 {
-	assert(pKey != NULL);
-	LPPER_HANDLE_DATA pValue = NULL;
-	{
-		std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-		pValue = getTunnelHandle(pKey);
-		m_tunnelTable.erase(pKey);
-		if (pValue != NULL)
-		{
-			m_tunnelTable.erase(pValue);
-		}
-	}
-
-	if (pValue != NULL)
-	{
-		pValue->Close();
-	}
-
-	pKey->Close();
+	return __super::onServerError(pIoCtx, dwErr);
 }
 
-void CHttpTunnel::removeTunnelHandle(const LPPER_HANDLE_DATA pKey)
+void CHttpTunnel::onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx)
 {
-	std::lock_guard<decltype(m_tunnelGuard)> _(m_tunnelGuard);
-
-	auto pData = getTunnelHandle(pKey);
-	if (pData != NULL)
-	{
-		m_tunnelTable.erase(pData);
-	}
-
-	m_tunnelTable.erase(pKey);
-}
-
-bool CHttpTunnel::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
-{
-	if (handleAcceptBuffer(pHandleData, pIoData, dwLen))
-	{
-		return onRecvPosted(pHandleData, pIoData, dwLen);
-	}
-	else
-	{
-		return true;
-	}
-}
-
-bool CHttpTunnel::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
-{
-	if (!handleRecvBuffer(pHandleData, pIoData, dwLen))
-	{
-		return false;
-	}
-	auto pTarget = getTunnelHandle(pHandleData);
-	if (pTarget != NULL)
-	{
-		auto pSendBuffer = pTarget->sendBuf;
-		pSendBuffer->SetPayload(pIoData->wsaBuffer.buf, pIoData->wsaBuffer.len);
-		return PostSend(pTarget, pSendBuffer);
-	}
-	else
-	{
-		destroyTunnelHandle(pHandleData);
-		return false;
-	}
-	return false;
-}
-
-bool CHttpTunnel::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwLen)
-{
-	if (dwLen < pIoData->wsaBuffer.len)
-	{
-		pIoData->wsaBuffer.buf = pIoData->wsaBuffer.buf + dwLen;
-		pIoData->wsaBuffer.len = pIoData->wsaBuffer.len - dwLen;
-		return PostSend(pHandleData, pIoData);
-	}
-	else
-	{
-		auto pPeer = getTunnelHandle(pHandleData);
-		if (pPeer != NULL)
-		{
-			auto pRecvBuffer = pPeer->recvBuf;
-			return PostRecv(pPeer, pRecvBuffer);
-		}
-		else
-		{
-			destroyTunnelHandle(pHandleData);
-			return false;
-		}
-	}
-}
-
-void CHttpTunnel::onServerError(LPPER_HANDLE_DATA pHandleData, DWORD dwErr)
-{
-	return __super::onServerError(pHandleData, dwErr);
-}
-
-void CHttpTunnel::onDisconnected(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
-{
-	destroyTunnelHandle(pHandleData);
-	return __super::onDisconnected(pHandleData, pIoData);
+	return __super::onDisconnected(pSocketCtx, pIoCtx);
 }

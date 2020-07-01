@@ -14,23 +14,6 @@ static LPFN_GETACCEPTEXSOCKADDRS PtrGetAcceptExSockAddrs;
 	std::shared_ptr<SOCKET> _defer_##hDummy(&hDummy, [](SOCKET* hDelegated) { ::closesocket(*hDelegated); })
 
 
-#include <set>
-static std::set<LPPER_HANDLE_DATA> g_handleDataList;
-std::mutex g_listGuard;
-
-void PutDataList(LPPER_HANDLE_DATA pData)
-{
-	std::lock_guard<std::mutex> _(g_listGuard);
-	g_handleDataList.insert(pData);
-}
-
-void RemoveDataList(LPPER_HANDLE_DATA pData)
-{
-	std::lock_guard<std::mutex> _(g_listGuard);
-	g_handleDataList.erase(pData);
-	assert(g_handleDataList.find(pData) == g_handleDataList.end());
-}
-
 DWORD CIOCPServer::StartServer(unsigned short port)
 {
 	DWORD dwResult = init();
@@ -41,41 +24,50 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 
 	SOCKADDR_IN addr = { 0 };
 	addr.sin_family = AF_INET;
-	InetPtonW(AF_INET, L"127.0.0.1", &addr.sin_addr.s_addr);
-	//addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+	//InetPtonW(AF_INET, L"127.0.0.1", &addr.sin_addr.s_addr);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	addr.sin_port = htons(port);
 
-	SOCKET l = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (l == INVALID_SOCKET)
+	do
 	{
-		return ::WSAGetLastError();
-	}
+		SOCKET l = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+		if (l == INVALID_SOCKET)
+		{
+			break;
+		}
 
-	// 设置SO_REUSEADDR，防止程序异常退出，重启之后无法绑定对应端口
-	//int optReuse = 1;
-	//::setsockopt(l, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&optReuse), sizeof(optReuse));
-	m_pListenContext = PER_HANDLE_DATA::Create(l, reinterpret_cast<const SOCKADDR_STORAGE*>(&addr), sizeof(SOCKADDR_IN));
-	AssociateWithServer(reinterpret_cast<HANDLE>(l), reinterpret_cast<ULONG_PTR>(m_pListenContext), 0);
+		// 设置SO_REUSEADDR，防止程序异常退出，重启之后无法绑定对应端口
+		//int optReuse = 1;
+		//::setsockopt(l, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&optReuse), sizeof(optReuse));
+		AssociateWithServer(reinterpret_cast<HANDLE>(l), NULL, 0);
 
-	if (SOCKET_ERROR == ::bind(l, (const PSOCKADDR)&addr, sizeof(addr)))
-	{
-		::closesocket(l);
-		return ::WSAGetLastError();
-	}
-	if (SOCKET_ERROR == ::listen(l, SOMAXCONN))
-	{
-		::closesocket(l);
-		return ::WSAGetLastError();
-	}
+		if (SOCKET_ERROR == ::bind(l, (const PSOCKADDR)&addr, sizeof(addr)))
+		{
+			::closesocket(l);
+			break;
+		}
+		if (SOCKET_ERROR == ::listen(l, SOMAXCONN))
+		{
+			::closesocket(l);
+			break;
+		}
 
-	postAccept(m_pListenContext->recvBuf);
-	postAccept(m_pListenContext->sendBuf);
+		m_hListenSocket = l;
 
-	::WaitForSingleObject(m_hStopEvt, INFINITE);
+		for (int i = 0; i < 5; i++)
+		{
+			VERIFY(prepareSocket() != NULL);
+		}
+
+		::WaitForSingleObject(m_hStopEvt, INFINITE);
+
+	} while (0);
+
+	dwResult = ::WSAGetLastError();
 
 	uninit();
 
-	return ERROR_SUCCESS;
+	return dwResult;
 }
 
 void CIOCPServer::StopServer()
@@ -91,7 +83,7 @@ CIOCPServer::CIOCPServer()
 {
 	m_bRun = true;
 	m_hIOCP = NULL;
-	m_pListenContext = NULL;
+	m_hListenSocket = INVALID_SOCKET;
 	m_hStopEvt = NULL;
 }
 
@@ -161,12 +153,6 @@ DWORD CIOCPServer::init()
 
 void CIOCPServer::uninit()
 {
-	if (m_pListenContext != NULL)
-	{
-		delete m_pListenContext;
-		m_pListenContext = NULL;
-	}
-
 	BOOL bPostOk = TRUE;
 	for (size_t i = 0; bPostOk && i < m_workers.size(); i++)
 	{
@@ -200,46 +186,55 @@ void CIOCPServer::uninit()
 		m_hStopEvt = NULL;
 	}
 
+	if (m_hListenSocket != INVALID_SOCKET)
+	{
+		::closesocket(m_hListenSocket);
+		m_hListenSocket = INVALID_SOCKET;
+	}
+	clearSockets();
+
 }
 
-bool CIOCPServer::handleAccept(LPPER_IO_DATA pIoData, LPPER_HANDLE_DATA* ppAcceptSockData, LPPER_IO_DATA* ppAcceptIoData)
+bool CIOCPServer::handleAccept(LPIOContext pIoCtx, DWORD dwBytesRecv)
 {
-	::setsockopt(pIoData->hAccept, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
-		reinterpret_cast<const char*>(&m_pListenContext->hPeer),
-		sizeof(m_pListenContext->hPeer));
+	SOCKADDR_IN srvAddr = { 0 };
+	srvAddr.sin_addr.s_addr = INADDR_NONE;
+	if (!onAcceptPosted(pIoCtx->GetSocketContext(), pIoCtx, dwBytesRecv, &srvAddr))
+	{
+		return false;
+	}
+	if (srvAddr.sin_addr.s_addr == INADDR_NONE || srvAddr.sin_port == 0)
+	{
+		return false;
+	}
+
+	bool bAcceptOk = pIoCtx->GetSocketContext()->CompleteAccept(m_hListenSocket, &srvAddr);
+	bAcceptOk = onServerConnectPosted(pIoCtx->GetSocketContext(), dwBytesRecv, bAcceptOk);
+	if (!bAcceptOk)
+	{
+		return false;
+	}
 
 	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
-	SOCKADDR_IN* remoteAddr = NULL, * localAddr = NULL;
-	int remoteLen = sizeof(SOCKADDR_IN);
-	int localLen = sizeof(SOCKADDR_IN);
-	PtrGetAcceptExSockAddrs(pIoData->wsaBuffer.buf,
-		pIoData->wsaBuffer.len - (AddrLength * 2),
-		AddrLength,
-		AddrLength,
-		reinterpret_cast<LPSOCKADDR*>(&localAddr),
-		&localLen,
-		reinterpret_cast<LPSOCKADDR*>(&remoteAddr),
-		&remoteLen);
+	if (dwBytesRecv < AddrLength * 2)
+	{
+		return false;
+	}
 
-	auto pAcceptData = PER_HANDLE_DATA::Create(pIoData->hAccept,
-		reinterpret_cast<const SOCKADDR_STORAGE*>(remoteAddr), remoteLen);
-	auto pAcceptIoData = pAcceptData->recvBuf;
-	pAcceptIoData->Reset(IO_OPT_TYPE::ACCEPT_POSTED);
+	//SOCKADDR_IN* remoteAddr = NULL, * localAddr = NULL;
+	//int remoteLen = sizeof(SOCKADDR_IN);
+	//int localLen = sizeof(SOCKADDR_IN);
+	//PtrGetAcceptExSockAddrs(pIoCtx->buffer,
+	//	dwBytesRecv - (AddrLength * 2),
+	//	AddrLength,
+	//	AddrLength,
+	//	reinterpret_cast<LPSOCKADDR*>(&localAddr),
+	//	&localLen,
+	//	reinterpret_cast<LPSOCKADDR*>(&remoteAddr),
+	//	&remoteLen);
 
-	memcpy_s(pAcceptIoData->buffer, HTTPPROXY_BUFFER_LENGTH, pIoData->buffer, HTTPPROXY_BUFFER_LENGTH);
-	pAcceptIoData->hAccept = pIoData->hAccept;
-
-	::CreateIoCompletionPort(reinterpret_cast<HANDLE>(pAcceptIoData->hAccept), m_hIOCP, reinterpret_cast<ULONG_PTR>(pAcceptData), 0);
-
-	postAccept(pIoData);
-	//if (!::QueueUserWorkItem(workforAccepted, this, WT_EXECUTEDEFAULT))
-	//{
-	//	postAccept();
-	//	assert(0);
-	//}
-
-	*ppAcceptSockData = pAcceptData;
-	*ppAcceptIoData = pAcceptIoData;
+	// 准备一个新的socket供后续新的连接使用
+	VERIFY(prepareSocket() != NULL);
 
 	return true;
 }
@@ -247,22 +242,22 @@ bool CIOCPServer::handleAccept(LPPER_IO_DATA pIoData, LPPER_HANDLE_DATA* ppAccep
 void CIOCPServer::iocpWorker()
 {
 	DWORD dwTransferred = 0;
-	LPPER_HANDLE_DATA pHandleData = NULL;
-	LPPER_IO_DATA pIoData = NULL;
+	LPSocketContext pSocketCtx = NULL;
+	LPIOContext pIoCtx = NULL;
 	LPOVERLAPPED pOverlapped = NULL;
 	while (m_bRun)
 	{
-		pHandleData = NULL;
+		pSocketCtx = NULL;
 		pOverlapped = NULL;
 
 		BOOL bResult = ::GetQueuedCompletionStatus(m_hIOCP, &dwTransferred,
-			reinterpret_cast<PULONG_PTR>(&pHandleData), &pOverlapped, INFINITE);
-		pIoData = CONTAINING_RECORD(pOverlapped, PER_IO_DATA, overlapped);
+			reinterpret_cast<PULONG_PTR>(&pSocketCtx), &pOverlapped, INFINITE);
 		if (!bResult)
 		{
 			// 异常
-			if (!handleError(pHandleData, pIoData, ::GetLastError()))
+			if (!handleError(pIoCtx, ::GetLastError()))
 			{
+				// IOCP 异常，退出工作线程
 				break;
 			}
 			else
@@ -270,129 +265,141 @@ void CIOCPServer::iocpWorker()
 				continue;
 			}
 		}
-		if (pHandleData == NULL || pOverlapped == NULL)
+		if (pOverlapped == NULL)
 		{
 			// 退出通知
 			break;
 		}
+		pIoCtx = CONTAINING_RECORD(pOverlapped, IOContext, overlapped);
+		if (pSocketCtx == NULL)
+		{
+			// 从listen socket 过来的连接
+			assert(pIoCtx->opType == IO_OPT_TYPE::ACCEPT_POSTED);
+			pSocketCtx = pIoCtx->GetSocketContext();
+		}
 
 		if (dwTransferred == 0
-			&& (pIoData->opType == IO_OPT_TYPE::RECV_POSTED || pIoData->opType == IO_OPT_TYPE::SEND_POSTED))
+			&& (pIoCtx->opType == IO_OPT_TYPE::RECV_POSTED || pIoCtx->opType == IO_OPT_TYPE::SEND_POSTED))
 		{
 			// 客户端断开
-			onDisconnected(pHandleData, pIoData);
+			handleDisconnected(pSocketCtx, pIoCtx);
 			continue;
 		}
 
 		bool bOk = true;
-		switch (pIoData->opType)
+		switch (pIoCtx->opType)
 		{
 		case IO_OPT_TYPE::ACCEPT_POSTED:
 		{
-			assert(pHandleData == m_pListenContext);
-			LPPER_HANDLE_DATA pAcceptSock = NULL;
-			LPPER_IO_DATA pAcceptIo = NULL;
-			if (handleAccept(pIoData, &pAcceptSock, &pAcceptIo))
-			{
-				bOk = onAcceptPosted(pAcceptSock, pAcceptIo, dwTransferred);
-			}
-			else
-			{
-				assert(0);
-			}
+			bOk = handleAccept(pIoCtx, dwTransferred);
 		}
 		break;
 		case IO_OPT_TYPE::RECV_POSTED:
-			bOk = onRecvPosted(pHandleData, pIoData, dwTransferred);
+			bOk = onRecvPosted(pSocketCtx, pIoCtx, dwTransferred);
 			break;
 		case IO_OPT_TYPE::SEND_POSTED:
-			bOk = onSendPosted(pHandleData, pIoData, dwTransferred);
+			bOk = onSendPosted(pSocketCtx, pIoCtx, dwTransferred);
 			break;
 		case IO_OPT_TYPE::NONE_POSTED:
 		default:
 			assert(0);
+			bOk = true;
 			break;
 		}
 		if (!bOk)
 		{
+			CloseIoSocket(pIoCtx);
 			::OutputDebugString(L"process IO_OPT_TYPE error\n");
 		}
 	}
 
-	assert(pHandleData == NULL);
 }
 
-bool CIOCPServer::onAcceptPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
+bool CIOCPServer::onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD, SOCKADDR_IN*)
 {
-	assert(pHandleData->recvBuf == pIoData);
-	pIoData->Reset(IO_OPT_TYPE::RECV_POSTED);
-	return PostRecv(pHandleData, pIoData);
-}
-
-bool CIOCPServer::PostRecv(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
-{
-	assert(pHandleData->recvBuf == pIoData);
-	pIoData->opType = IO_OPT_TYPE::RECV_POSTED;
-	DWORD dwFlag = 0;
-	if (::WSARecv(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, &dwFlag, &pIoData->overlapped, NULL) != 0)
-	{
-		return ::WSAGetLastError() == WSA_IO_PENDING;
-	}
+	assert(pIoCtx->GetSocketContext() == pSocketCtx);
+	//peerAddr->sin_family = AF_INET;
+	//peerAddr->sin_port = htons(1081);
+	//peerAddr->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	return true;
 }
 
-bool CIOCPServer::onRecvPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
+bool CIOCPServer::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen, bool success)
 {
-	assert(pHandleData->recvBuf == pIoData);
-	return PostRecv(pHandleData, pIoData);
-}
-
-bool CIOCPServer::onSendPosted(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD)
-{
-	assert(pHandleData->sendBuf == pIoData);
-	pIoData->Reset(IO_OPT_TYPE::SEND_POSTED);
-	return true;
-}
-
-void CIOCPServer::onServerError(LPPER_HANDLE_DATA, DWORD)
-{
-
-}
-
-void CIOCPServer::onDisconnected(LPPER_HANDLE_DATA, LPPER_IO_DATA)
-{
-}
-
-bool CIOCPServer::PostSend(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData)
-{
-	assert(pIoData == pHandleData->sendBuf);
-	pIoData->opType = IO_OPT_TYPE::SEND_POSTED;
-	DWORD dwFlag = 0;
-	if (::WSASend(pHandleData->hPeer, &pIoData->wsaBuffer, 1, NULL, dwFlag, &pIoData->overlapped, NULL) != 0)
+	if (success)
 	{
-		return ::WSAGetLastError() == WSA_IO_PENDING;
+		return pSocketCtx->GetServerToUserContext()->PostRecv()
+			&& pSocketCtx->GetUserToServerContext()->PostSend(dwLen);
 	}
-	return true;
+	return false;
 }
 
-bool CIOCPServer::postAccept(LPPER_IO_DATA pIoData)
+bool CIOCPServer::onRecvPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen)
 {
-	assert(pIoData == m_pListenContext->recvBuf || pIoData == m_pListenContext->sendBuf);
-	pIoData->Reset(IO_OPT_TYPE::ACCEPT_POSTED);
+	assert(pIoCtx->GetSocketContext() == pSocketCtx);
+	return pIoCtx->PostSend(dwLen);
+}
 
-	SOCKET hClient = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (INVALID_SOCKET == hClient)
+bool CIOCPServer::onSendPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD)
+{
+	assert(pIoCtx->GetSocketContext() == pSocketCtx);
+	pIoCtx->ResetBuffer();
+	return pIoCtx->PostRecv();
+}
+
+void CIOCPServer::onServerError(LPIOContext, DWORD)
+{
+
+}
+
+void CIOCPServer::onDisconnected(LPSocketContext, LPIOContext)
+{
+}
+
+void CIOCPServer::CloseIoSocket(LPIOContext pIo)
+{
+	std::lock_guard<std::recursive_mutex> _(m_connTableGuard);
+	if (pIo->GetSocketContext()->Close(pIo))
 	{
-		return false;
+		deleteSocket(pIo->GetSocketContext());
 	}
-	pIoData->hAccept = hClient;
-	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
-	return TRUE == PtrAcceptEx(m_pListenContext->hPeer, hClient, pIoData->wsaBuffer.buf,
-		pIoData->wsaBuffer.len - (AddrLength * 2),
-		AddrLength,
-		AddrLength,
-		NULL,
-		&pIoData->overlapped);
+}
+
+LPSocketContext CIOCPServer::prepareSocket()
+{
+	auto pSocktCtx = new SocketContext();
+	if (!pSocktCtx->Init(m_hIOCP) || !pSocktCtx->PostAccept(m_hListenSocket))
+	{
+		delete pSocktCtx;
+		assert(0);
+		return NULL;
+	}
+
+	{
+		std::lock_guard<std::recursive_mutex> _(m_connTableGuard);
+		m_connTable.insert(pSocktCtx);
+	}
+
+	return pSocktCtx;
+}
+
+void CIOCPServer::deleteSocket(LPSocketContext pCtx)
+{
+	{
+		std::lock_guard<std::recursive_mutex> _(m_connTableGuard);
+		m_connTable.erase(pCtx);
+	}
+	delete pCtx;
+}
+
+void CIOCPServer::clearSockets()
+{
+	std::lock_guard<std::recursive_mutex> _(m_connTableGuard);
+	for (LPSocketContext pCtx : m_connTable)
+	{
+		delete pCtx;
+	}
+	m_connTable.clear();
 }
 
 HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads)
@@ -400,7 +407,7 @@ HANDLE CIOCPServer::AssociateWithServer(HANDLE hFile, ULONG_PTR CompletionKey, D
 	return ::CreateIoCompletionPort(hFile, m_hIOCP, CompletionKey, NumberOfConcurrentThreads);
 }
 
-bool CIOCPServer::handleError(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoData, DWORD dwErr)
+bool CIOCPServer::handleError(LPIOContext pIoCtx, DWORD dwErr)
 {
 	bool bResult = false;
 	switch (dwErr)
@@ -432,10 +439,16 @@ bool CIOCPServer::handleError(LPPER_HANDLE_DATA pHandleData, LPPER_IO_DATA pIoDa
 		break;
 	}
 
-	onServerError(pHandleData, dwErr);
-	assert(pIoData != NULL);
-	delete pHandleData;
+	onServerError(pIoCtx, dwErr);
+	assert(pIoCtx != NULL);
+	CloseIoSocket(pIoCtx);
 	return bResult;
+}
+
+void CIOCPServer::handleDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx)
+{
+	onDisconnected(pSocketCtx, pIoCtx);
+	CloseIoSocket(pIoCtx);
 }
 
 DWORD WINAPI CIOCPServer::workforAccepted(_In_ LPVOID lpParameter)
@@ -443,71 +456,211 @@ DWORD WINAPI CIOCPServer::workforAccepted(_In_ LPVOID lpParameter)
 	return 0;
 }
 
-_PER_IO_DATA::_PER_IO_DATA(IO_OPT_TYPE opType)
+IOContext::IOContext(SocketContext* pSocketCtx, SOCKET& inSocket, SOCKET& outSocket)
+	: hInSocket(inSocket), hOutSocket(outSocket)
 {
-	Reset(opType);
+	this->pSocketCtx = pSocketCtx;
+	this->opType = IO_OPT_TYPE::NONE_POSTED;
+	ResetBuffer();
 }
 
-void _PER_IO_DATA::Reset(IO_OPT_TYPE opType)
+void IOContext::ResetBuffer()
 {
-	::ZeroMemory(this, sizeof(*this));
-	wsaBuffer.buf = buffer;
-	wsaBuffer.len = HTTPPROXY_BUFFER_LENGTH;
-	this->opType = opType;
-	this->hAccept = INVALID_SOCKET;
+	::ZeroMemory(this->buffer, _countof(buffer));
+	::ZeroMemory(&overlapped, sizeof(overlapped));
 }
 
-bool _PER_IO_DATA::SetPayload(const char* src, size_t length)
+bool IOContext::SetPayload(const char* src, DWORD dwLen)
 {
-	static_assert(sizeof(this->buffer) == HTTPPROXY_BUFFER_LENGTH + 1, "assert error");
-	::ZeroMemory(this->buffer, HTTPPROXY_BUFFER_LENGTH + 1);
+	return 0 == ::memcpy_s(buffer, HTTPPROXY_BUFFER_LENGTH, src, dwLen);
+}
 
-	assert(length <= HTTPPROXY_BUFFER_LENGTH);
-	if (memcpy_s(this->buffer, HTTPPROXY_BUFFER_LENGTH, src, length) == 0)
+bool IOContext::PostSend(DWORD dwLength)
+{
+	assert(hOutSocket != INVALID_SOCKET && hOutSocket != NULL);
+
+	this->opType = IO_OPT_TYPE::SEND_POSTED;
+	DWORD dwFlag = 0;
+	WSABUF sendBuf;
+	sendBuf.buf = this->buffer;
+	sendBuf.len = dwLength;
+	if (::WSASend(hOutSocket, &sendBuf, 1, NULL, dwFlag, &overlapped, NULL) != 0)
 	{
-		this->wsaBuffer.buf = this->buffer;
-		this->wsaBuffer.len = length;
-		return true;
+		return ::WSAGetLastError() == WSA_IO_PENDING;
 	}
-	else
+	return true;
+}
+
+bool IOContext::PostRecv()
+{
+	assert(hInSocket != INVALID_SOCKET && hInSocket != NULL);
+
+	this->opType = IO_OPT_TYPE::RECV_POSTED;
+	DWORD dwFlag = 0;
+	WSABUF recvBuf;
+	recvBuf.buf = this->buffer;
+	recvBuf.len = HTTPPROXY_BUFFER_LENGTH;
+	if (::WSARecv(hInSocket, &recvBuf, 1, NULL, &dwFlag, &overlapped, NULL) != 0)
 	{
+		return ::WSAGetLastError() == WSA_IO_PENDING;
+	}
+	return true;
+}
+
+void IOContext::Close()
+{
+	assert(hInSocket != INVALID_SOCKET && hInSocket != NULL);
+	assert(hOutSocket != INVALID_SOCKET && hOutSocket != NULL);
+	::shutdown(hInSocket, SD_RECEIVE);
+	::shutdown(hOutSocket, SD_SEND);
+}
+
+SocketContext* IOContext::GetSocketContext()
+{
+	return pSocketCtx;
+}
+
+bool SocketContext::Init(HANDLE hIocp)
+{
+	auto user = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (user == INVALID_SOCKET)
+	{
+		assert(::WSAGetLastError() == 0);
 		return false;
 	}
-}
-
-_PER_HANDLE_DATA::_PER_HANDLE_DATA()
-{
-	hPeer = INVALID_SOCKET;
-	uUser = 0UL;
-	recvBuf = new PER_IO_DATA(IO_OPT_TYPE::NONE_POSTED);
-	sendBuf = new PER_IO_DATA(IO_OPT_TYPE::NONE_POSTED);
-	::ZeroMemory(&peerAddr, sizeof(SOCKADDR_STORAGE));
-}
-
-_PER_HANDLE_DATA::~_PER_HANDLE_DATA()
-{
-	if (hPeer != INVALID_SOCKET)
+	auto server = ::WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (server == INVALID_SOCKET)
 	{
-		::closesocket(hPeer);
-		hPeer = INVALID_SOCKET;
+		assert(::WSAGetLastError() == 0);
+		::closesocket(user);
+		return false;
 	}
-	delete recvBuf;
-	delete sendBuf;
-	RemoveDataList(this);
+
+	if (::CreateIoCompletionPort(reinterpret_cast<HANDLE>(user), hIocp, reinterpret_cast<ULONG_PTR>(this), 0)
+		== NULL)
+	{
+		::closesocket(user);
+		::closesocket(server);
+		return false;
+	}
+	if (::CreateIoCompletionPort(reinterpret_cast<HANDLE>(server), hIocp, reinterpret_cast<ULONG_PTR>(this), 0)
+		== NULL)
+	{
+		::closesocket(user);
+		::closesocket(server);
+		return false;
+	}
+
+	userSocket = user;
+	serverSocket = server;
+	connCount = 2;
+	return true;
 }
 
-void _PER_HANDLE_DATA::Close()
+bool SocketContext::Close(LPIOContext pIO)
 {
-	::shutdown(hPeer, SD_BOTH);
+	if (connCount == 0)
+	{
+		return true;
+	}
+
+	pIO->Close();
+
+	if (--connCount == 0)
+	{
+		this->close();
+		return true;
+	}
+	return false;
 }
 
-LPPER_HANDLE_DATA _PER_HANDLE_DATA::Create(SOCKET hSock, const SOCKADDR_STORAGE* pAddr,
-	size_t length, unsigned long user)
+bool SocketContext::PostAccept(SOCKET hListen)
 {
-	auto pThis = new PER_HANDLE_DATA;
-	pThis->hPeer = hSock;
-	memcpy_s(&pThis->peerAddr, sizeof(pThis->peerAddr), pAddr, length);
-	pThis->uUser = user;
-	PutDataList(pThis);
-	return pThis;
+	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
+	usr2SrvCtx.opType = IO_OPT_TYPE::ACCEPT_POSTED;
+	if (!PtrAcceptEx(hListen, userSocket, this->usr2SrvCtx.buffer,
+		HTTPPROXY_BUFFER_LENGTH - (AddrLength * 2),
+		AddrLength,
+		AddrLength,
+		NULL,
+		&this->usr2SrvCtx.overlapped))
+	{
+		return WSA_IO_PENDING == ::WSAGetLastError();
+	}
+	return true;
+}
+
+bool SocketContext::CompleteAccept(SOCKET hListen, const SOCKADDR_IN* addr)
+{
+	::setsockopt(userSocket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, reinterpret_cast<const char*>(&hListen),
+		sizeof(SOCKET));
+
+	if (0 != ::WSAConnect(serverSocket, reinterpret_cast<const sockaddr*>(addr), sizeof(SOCKADDR_IN),
+		NULL, NULL, NULL, NULL))
+	{
+		assert(0 == ::WSAGetLastError());
+		return false;
+	}
+	return true;
+	//if (!srv2UsrCtx.PostRecv())
+	//{
+	//	return false;
+	//}
+
+	//if (dwBytesRecv != 0)
+	//{
+	//	return usr2SrvCtx.PostSend(dwBytesRecv);
+	//}
+	//else
+	//{
+	//	return true;
+	//}
+}
+
+LPIOContext SocketContext::GetUserToServerContext()
+{
+	return &usr2SrvCtx;
+}
+
+LPIOContext SocketContext::GetServerToUserContext()
+{
+	return &srv2UsrCtx;
+}
+
+unsigned long SocketContext::GetCustomData() const
+{
+	return this->data;
+}
+
+void SocketContext::SetCustomData(unsigned long x)
+{
+	this->data = x;
+}
+
+SocketContext::~SocketContext()
+{
+	this->close();
+}
+
+SocketContext::SocketContext()
+	: userSocket(INVALID_SOCKET), serverSocket(INVALID_SOCKET),
+	usr2SrvCtx(this, userSocket, serverSocket),
+	srv2UsrCtx(this, serverSocket, userSocket),
+	connCount(0), data(0)
+{
+
+}
+
+void SocketContext::close()
+{
+	if (userSocket != INVALID_SOCKET)
+	{
+		::closesocket(userSocket);
+		userSocket = INVALID_SOCKET;
+	}
+	if (serverSocket != INVALID_SOCKET)
+	{
+		::closesocket(serverSocket);
+		serverSocket = INVALID_SOCKET;
+	}
 }

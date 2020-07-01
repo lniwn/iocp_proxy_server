@@ -23,3 +23,12 @@
 #include <vector>
 #include <functional>
 #include <cassert>
+#include <set>
+
+#ifndef VERIFY
+#if _DEBUG
+#define VERIFY(x) assert(x)
+#else
+#define VERIFY(x) (void*)(x)
+#endif
+#endif
