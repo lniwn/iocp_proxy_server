@@ -233,9 +233,6 @@ bool CIOCPServer::handleAccept(LPIOContext pIoCtx, DWORD dwBytesRecv)
 	//	reinterpret_cast<LPSOCKADDR*>(&remoteAddr),
 	//	&remoteLen);
 
-	// 准备一个新的socket供后续新的连接使用
-	VERIFY(prepareSocket() != NULL);
-
 	return true;
 }
 
@@ -291,6 +288,9 @@ void CIOCPServer::iocpWorker()
 		{
 		case IO_OPT_TYPE::ACCEPT_POSTED:
 		{
+			// 准备一个新的socket供后续新的连接使用
+			VERIFY(prepareSocket() != NULL);
+
 			bOk = handleAccept(pIoCtx, dwTransferred);
 		}
 		break;
@@ -594,7 +594,7 @@ bool SocketContext::CompleteAccept(SOCKET hListen, const SOCKADDR_IN* addr)
 	if (0 != ::WSAConnect(serverSocket, reinterpret_cast<const sockaddr*>(addr), sizeof(SOCKADDR_IN),
 		NULL, NULL, NULL, NULL))
 	{
-		assert(0 == ::WSAGetLastError());
+		//assert(0 == ::WSAGetLastError());
 		return false;
 	}
 	return true;

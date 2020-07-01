@@ -32,15 +32,13 @@ CHttpTunnel::CHttpTunnel()
 bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
 	SOCKADDR_IN* peerAddr)
 {
-	//sendHttpResponse(pHandleData, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
-
 	int methodIndex = getHttpProtocol(pIoCtx->buffer, dwLen);
 	if (methodIndex < 0)
 	{
-		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 400 Bad Request\r\n\r\n"))
+		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"))
 		{
 			assert(0);
-			CloseIoSocket(pSocketCtx->GetServerToUserContext());
+			//CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}
@@ -67,10 +65,10 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 	std::string port;
 	if (!extractHost(pIoCtx->buffer, dwHeaderLen, host, port))
 	{
-		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 422 Unprocessable Entity\r\n\r\n"))
+		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 422 Unprocessable Entity\r\nConnection: close\r\n\r\n"))
 		{
 			assert(0);
-			CloseIoSocket(pSocketCtx->GetServerToUserContext());
+			//CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}
@@ -227,8 +225,18 @@ bool CHttpTunnel::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen,
 {
 	if (pSocketCtx->GetCustomData() == TunnelHttpProxy)
 	{
-		return sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 200 Connection Established\r\n\r\n")
-			&& pSocketCtx->GetUserToServerContext()->PostRecv();
+		if (success)
+		{
+			return sendHttpResponse(pSocketCtx->GetServerToUserContext(), 
+				"HTTP/1.1 200 Connection Established\r\nConnection: keep-alive\r\n\r\n")
+				&& pSocketCtx->GetUserToServerContext()->PostRecv();
+		}
+		else
+		{
+			sendHttpResponse(pSocketCtx->GetServerToUserContext(), 
+				"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n");
+			return false;
+		}
 	}
 	else
 	{
