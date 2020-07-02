@@ -38,7 +38,6 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"))
 		{
 			assert(0);
-			//CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}
@@ -68,7 +67,6 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 		if (!sendHttpResponse(pSocketCtx->GetServerToUserContext(), "HTTP/1.1 422 Unprocessable Entity\r\nConnection: close\r\n\r\n"))
 		{
 			assert(0);
-			//CloseIoSocket(pSocketCtx->GetServerToUserContext());
 		}
 		return false;
 	}

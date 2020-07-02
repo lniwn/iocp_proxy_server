@@ -106,4 +106,5 @@ private:
 	std::atomic_bool m_bRun;
 	SOCKET m_hListenSocket;
 	HANDLE m_hStopEvt;
+	SOCKADDR_IN m_listenAddr;
 };

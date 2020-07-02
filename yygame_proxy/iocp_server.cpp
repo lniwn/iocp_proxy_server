@@ -53,6 +53,7 @@ DWORD CIOCPServer::StartServer(unsigned short port)
 		}
 
 		m_hListenSocket = l;
+		m_listenAddr = addr;
 
 		for (int i = 0; i < 5; i++)
 		{
@@ -85,6 +86,7 @@ CIOCPServer::CIOCPServer()
 	m_hIOCP = NULL;
 	m_hListenSocket = INVALID_SOCKET;
 	m_hStopEvt = NULL;
+	::ZeroMemory(&m_listenAddr, sizeof(m_listenAddr));
 }
 
 CIOCPServer::~CIOCPServer()
@@ -207,6 +209,13 @@ bool CIOCPServer::handleAccept(LPIOContext pIoCtx, DWORD dwBytesRecv)
 	{
 		return false;
 	}
+	if (memcmp(&srvAddr, &m_listenAddr, sizeof(SOCKADDR_IN)) == 0)
+	{
+		// 禁止回环: 即通过代理访问代理地址
+		assert(pIoCtx == pIoCtx->GetSocketContext()->GetUserToServerContext());
+		CloseIoSocket(pIoCtx->GetSocketContext()->GetServerToUserContext());
+		return false;
+	}
 
 	bool bAcceptOk = pIoCtx->GetSocketContext()->CompleteAccept(m_hListenSocket, &srvAddr);
 	bAcceptOk = onServerConnectPosted(pIoCtx->GetSocketContext(), dwBytesRecv, bAcceptOk);
@@ -215,17 +224,12 @@ bool CIOCPServer::handleAccept(LPIOContext pIoCtx, DWORD dwBytesRecv)
 		return false;
 	}
 
-	constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
-	if (dwBytesRecv < AddrLength * 2)
-	{
-		return false;
-	}
-
+	//constexpr auto AddrLength = sizeof(SOCKADDR_IN) + 16;
 	//SOCKADDR_IN* remoteAddr = NULL, * localAddr = NULL;
 	//int remoteLen = sizeof(SOCKADDR_IN);
 	//int localLen = sizeof(SOCKADDR_IN);
 	//PtrGetAcceptExSockAddrs(pIoCtx->buffer,
-	//	dwBytesRecv - (AddrLength * 2),
+	//	HTTPPROXY_BUFFER_LENGTH - (AddrLength * 2),
 	//	AddrLength,
 	//	AddrLength,
 	//	reinterpret_cast<LPSOCKADDR*>(&localAddr),
