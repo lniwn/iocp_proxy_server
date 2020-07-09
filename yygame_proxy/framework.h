@@ -19,11 +19,11 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
-#include <map>
-#include <vector>
 #include <functional>
 #include <cassert>
 #include <set>
+#include <unordered_map>
+#include <list>
 
 #ifndef VERIFY
 #if _DEBUG

@@ -2,9 +2,11 @@
 #include <regex>
 #include <shlwapi.h>
 #include <ws2tcpip.h>
+#include <WinDNS.h>
 #include "http_tunnel.h"
 
 #pragma comment(lib, "Shlwapi.lib")
+#pragma comment(lib, "Dnsapi.lib")
 
 static constexpr ULONG INVALID_HEADER_LEN = ~1UL;
 
@@ -26,6 +28,7 @@ static constexpr unsigned long PlanHttpProxy = 1;
 static constexpr unsigned long TunnelHttpProxy = 2;
 
 CHttpTunnel::CHttpTunnel()
+	:m_dnsCache(1000)
 {
 }
 
@@ -70,29 +73,12 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 		}
 		return false;
 	}
-
-	addrinfo hints = { 0 };
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-	addrinfo* pResult = NULL;
-	if (GetAddrInfoA(host.c_str(), port.c_str(), &hints, &pResult) == 0)
+	ULONG ip = 0;
+	if (getIpByHost(host.c_str(), &ip))
 	{
-		addrinfo* pCursor = NULL;
-		for (pCursor = pResult; pCursor != NULL; pCursor = pCursor->ai_next)
-		{
-			if (pCursor->ai_family == AF_INET)
-			{
-				break;
-			}
-		}
-		bool bFind = (pCursor != NULL);
-		if (bFind)
-		{
-			assert(sizeof(SOCKADDR_IN) == pCursor->ai_addrlen);
-			memcpy_s(peerAddr, sizeof(SOCKADDR_IN), pCursor->ai_addr, pCursor->ai_addrlen);
-		}
-		FreeAddrInfoA(pResult);
+		peerAddr->sin_family = AF_INET;
+		peerAddr->sin_port = htons(static_cast<u_short>(StrToIntA(port.c_str())));
+		peerAddr->sin_addr.s_addr = ip;
 
 		if (methodIndex == CONNECT_INDEX)
 		{
@@ -102,15 +88,12 @@ bool CHttpTunnel::handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIo
 		{
 			pSocketCtx->SetCustomData(PlanHttpProxy);
 		}
-		return bFind;
+		return true;
 	}
-	else
-	{
-		return false;
-	}
+	return false;
 }
 
-ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD dwLen)
+ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD)
 {
 	const char* pBase = pIoCtx->buffer;
 	auto pHeaderEnd = StrStrA(pBase, "\r\n\r\n");
@@ -213,6 +196,102 @@ int CHttpTunnel::getHttpProtocol(const char* header, DWORD dwSize)
 	return -1;
 }
 
+bool CHttpTunnel::getIpByHost(const char* host, ULONG* ip)
+{
+	std::string strHost = host;
+	{
+		// step1 从缓存获取
+		if (m_dnsCache.Fetch(strHost, ip))
+		{
+			return true;
+		}
+	}
+
+	{
+		// step2 检测是否ip
+		static_assert(sizeof(IN_ADDR) == sizeof(ULONG), "sizeof(IN_ADDR) != sizeof(ULONG)");
+		if (1 == ::InetPtonA(AF_INET, host, ip))
+		{
+			return true;
+		}
+	}
+
+	{
+		// step3 DnsQuery_A获取
+		PDNS_RECORD pRecord = NULL;
+		constexpr unsigned int MemSize = sizeof(IP4_ARRAY) + sizeof(IP4_ADDRESS);
+		byte memBuf[MemSize] = { 0 };
+		PIP4_ARRAY pSrvList = reinterpret_cast<PIP4_ARRAY>(memBuf);
+		pSrvList->AddrCount = 2;
+		::InetPtonA(AF_INET, "223.5.5.5", pSrvList->AddrArray);
+		::InetPtonA(AF_INET, "119.29.29.29", &pSrvList->AddrArray[1]);
+		bool success = false;
+		if (0 == ::DnsQuery_A(host, DNS_TYPE_A,
+			DNS_QUERY_BYPASS_CACHE | DNS_QUERY_WIRE_ONLY,
+			pSrvList, &pRecord, NULL))
+		{
+
+			for (auto pCursor = pRecord; pCursor != NULL; pCursor = pCursor->pNext)
+			{
+				if (pCursor->Flags.S.Section != DnsSectionAnswer)
+				{
+					continue;
+				}
+				//if (::DnsNameCompare(pCursor->pName, host))
+				//{
+				//}
+				if (pCursor->wType == DNS_TYPE_A)
+				{
+					*ip = pCursor->Data.A.IpAddress;
+					m_dnsCache.Insert(strHost, *ip);
+					success = true;
+					break;
+				}
+			}
+			::DnsRecordListFree(pRecord, DnsFreeRecordListDeep);
+		}
+		if (success)
+		{
+			return true;
+		}
+	}
+
+	{
+		// step4 GetAddrInfoA获取
+		addrinfo hints = { 0 };
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_DGRAM;
+		hints.ai_protocol = IPPROTO_IP;
+		addrinfo* pResult = NULL;
+		if (GetAddrInfoA(host, "0", &hints, &pResult) == 0)
+		{
+			addrinfo* pCursor = NULL;
+			for (pCursor = pResult; pCursor != NULL; pCursor = pCursor->ai_next)
+			{
+				if (pCursor->ai_family == AF_INET)
+				{
+					break;
+				}
+			}
+			bool bFind = (pCursor != NULL);
+			if (bFind)
+			{
+				assert(sizeof(SOCKADDR_IN) == pCursor->ai_addrlen);
+				*ip = reinterpret_cast<SOCKADDR_IN*>(pCursor->ai_addr)->sin_addr.s_addr;
+				m_dnsCache.Insert(strHost, *ip);
+			}
+			FreeAddrInfoA(pResult);
+
+			if (bFind)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 bool CHttpTunnel::onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
 	SOCKADDR_IN* peerAddr)
 {
@@ -225,13 +304,13 @@ bool CHttpTunnel::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen,
 	{
 		if (success)
 		{
-			return sendHttpResponse(pSocketCtx->GetServerToUserContext(), 
+			return sendHttpResponse(pSocketCtx->GetServerToUserContext(),
 				"HTTP/1.1 200 Connection Established\r\nConnection: keep-alive\r\n\r\n")
 				&& pSocketCtx->GetUserToServerContext()->PostRecv();
 		}
 		else
 		{
-			sendHttpResponse(pSocketCtx->GetServerToUserContext(), 
+			sendHttpResponse(pSocketCtx->GetServerToUserContext(),
 				"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n");
 			return false;
 		}
@@ -239,6 +318,11 @@ bool CHttpTunnel::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen,
 	else
 	{
 		assert(pSocketCtx->GetCustomData() == PlanHttpProxy);
+		if (!success)
+		{
+			sendHttpResponse(pSocketCtx->GetServerToUserContext(),
+				"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n");
+		}
 		return __super::onServerConnectPosted(pSocketCtx, dwLen, success);
 	}
 }

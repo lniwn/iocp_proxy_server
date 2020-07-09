@@ -1,6 +1,7 @@
 #pragma once
 
 #include "iocp_server.h"
+#include "lru_cache.h"
 
 class CHttpTunnel : public CIOCPServer
 {
@@ -14,6 +15,7 @@ private:
 	bool sendHttpResponse(LPIOContext pIoCtx, const char* payload);
 	bool extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port);
 	int getHttpProtocol(const char* header, DWORD dwSize);
+	bool getIpByHost(const char* host, ULONG* ip);
 
 protected:
 	virtual bool onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
@@ -25,5 +27,5 @@ protected:
 	virtual void onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx) override;
 
 private:
-	std::map<std::string, ULONG> m_dnsCache; // domain ip
+	LRUCache<std::string, ULONG> m_dnsCache; // domain ip
 };
