@@ -104,13 +104,13 @@ ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD)
 	}
 	else
 	{
-		return pHeaderEnd - pBase + 4;
+		return static_cast<ULONG>(pHeaderEnd - pBase + 4);
 	}
 }
 
 bool CHttpTunnel::sendHttpResponse(LPIOContext pIoCtx, const char* payload)
 {
-	DWORD dwLen = strlen(payload);
+	DWORD dwLen = static_cast<DWORD>(strlen(payload));
 	pIoCtx->ResetBuffer();
 	pIoCtx->SetPayload(payload, dwLen);
 	return pIoCtx->PostSend(dwLen);

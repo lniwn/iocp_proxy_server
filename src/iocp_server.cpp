@@ -321,6 +321,8 @@ void CIOCPServer::iocpWorker()
 
 bool CIOCPServer::onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD, SOCKADDR_IN*)
 {
+	UNREFERENCED_PARAMETER(pSocketCtx);
+	UNREFERENCED_PARAMETER(pIoCtx);
 	assert(pIoCtx->GetSocketContext() == pSocketCtx);
 	//peerAddr->sin_family = AF_INET;
 	//peerAddr->sin_port = htons(1081);
@@ -340,12 +342,14 @@ bool CIOCPServer::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen,
 
 bool CIOCPServer::onRecvPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen)
 {
+	UNREFERENCED_PARAMETER(pSocketCtx);
 	assert(pIoCtx->GetSocketContext() == pSocketCtx);
 	return pIoCtx->PostSend(dwLen);
 }
 
 bool CIOCPServer::onSendPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD)
 {
+	UNREFERENCED_PARAMETER(pSocketCtx);
 	assert(pIoCtx->GetSocketContext() == pSocketCtx);
 	pIoCtx->ResetBuffer();
 	return pIoCtx->PostRecv();

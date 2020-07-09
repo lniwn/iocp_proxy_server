@@ -18,7 +18,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ::WSADATA data;
-    ::WSAStartup(MAKEWORD(2, 2), &data);
+    if (0 != ::WSAStartup(MAKEWORD(2, 2), &data))
+    {
+        return 1;
+    }
     CHttpTunnel proxy;
     proxy.StartServer(5280);
     ::WSACleanup();

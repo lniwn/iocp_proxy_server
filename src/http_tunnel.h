@@ -9,7 +9,7 @@ class CHttpTunnel : public CIOCPServer
 public:
 	struct DnsCache
 	{
-		ULONG ip; // 网络序
+		ULONG ip = { 0 }; // 网络序
 		std::chrono::system_clock::time_point expire; // 根据ttl算出的UTC过期时间绝对值
 
 		bool IsExpired();
