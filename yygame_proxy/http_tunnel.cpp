@@ -9,6 +9,7 @@
 #pragma comment(lib, "Dnsapi.lib")
 
 static constexpr ULONG INVALID_HEADER_LEN = ~1UL;
+static constexpr DWORD DEFAULT_DNS_TTL = 8600; // Ãë
 
 static constexpr const char* HTTP_METHODS[] = {
 		"GET",
@@ -201,9 +202,18 @@ bool CHttpTunnel::getIpByHost(const char* host, ULONG* ip)
 	std::string strHost = host;
 	{
 		// step1 ´Ó»º´æ»ñÈ¡
-		if (m_dnsCache.Fetch(strHost, ip))
+		DnsCache dc;
+		if (m_dnsCache.Fetch(strHost, &dc))
 		{
-			return true;
+			if (dc.IsExpired())
+			{
+				m_dnsCache.Remove(strHost);
+			}
+			else
+			{
+				*ip = dc.ip;
+				return true;
+			}
 		}
 	}
 
@@ -243,7 +253,8 @@ bool CHttpTunnel::getIpByHost(const char* host, ULONG* ip)
 				if (pCursor->wType == DNS_TYPE_A)
 				{
 					*ip = pCursor->Data.A.IpAddress;
-					m_dnsCache.Insert(strHost, *ip);
+					assert(pCursor->dwTtl != 0);
+					m_dnsCache.Insert(strHost, createDnsCache(*ip, pCursor->dwTtl));
 					success = true;
 					break;
 				}
@@ -278,7 +289,7 @@ bool CHttpTunnel::getIpByHost(const char* host, ULONG* ip)
 			{
 				assert(sizeof(SOCKADDR_IN) == pCursor->ai_addrlen);
 				*ip = reinterpret_cast<SOCKADDR_IN*>(pCursor->ai_addr)->sin_addr.s_addr;
-				m_dnsCache.Insert(strHost, *ip);
+				m_dnsCache.Insert(strHost, createDnsCache(*ip, 0));
 			}
 			FreeAddrInfoA(pResult);
 
@@ -290,6 +301,18 @@ bool CHttpTunnel::getIpByHost(const char* host, ULONG* ip)
 	}
 
 	return false;
+}
+
+CHttpTunnel::DnsCache CHttpTunnel::createDnsCache(ULONG ip, DWORD ttl)
+{
+	DnsCache dc;
+	dc.ip = ip;
+	if (ttl == 0)
+	{
+		ttl = DEFAULT_DNS_TTL;
+	}
+	dc.expire = std::chrono::system_clock::now() + std::chrono::seconds(ttl);
+	return dc;
 }
 
 bool CHttpTunnel::onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
@@ -345,4 +368,9 @@ void CHttpTunnel::onServerError(LPIOContext pIoCtx, DWORD dwErr)
 void CHttpTunnel::onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx)
 {
 	return __super::onDisconnected(pSocketCtx, pIoCtx);
+}
+
+bool CHttpTunnel::DnsCache::IsExpired()
+{
+	return std::chrono::system_clock::now() > this->expire;
 }

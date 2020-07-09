@@ -1,11 +1,20 @@
 #pragma once
 
+#include <chrono>
 #include "iocp_server.h"
 #include "lru_cache.h"
 
 class CHttpTunnel : public CIOCPServer
 {
 public:
+	struct DnsCache
+	{
+		ULONG ip; // 网络序
+		std::chrono::system_clock::time_point expire; // 根据ttl算出的UTC过期时间绝对值
+
+		bool IsExpired();
+	};
+
 	CHttpTunnel();
 
 private:
@@ -16,6 +25,7 @@ private:
 	bool extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port);
 	int getHttpProtocol(const char* header, DWORD dwSize);
 	bool getIpByHost(const char* host, ULONG* ip);
+	DnsCache createDnsCache(ULONG ip, DWORD ttl);
 
 protected:
 	virtual bool onAcceptPosted(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
@@ -27,5 +37,5 @@ protected:
 	virtual void onDisconnected(LPSocketContext pSocketCtx, LPIOContext pIoCtx) override;
 
 private:
-	LRUCache<std::string, ULONG> m_dnsCache; // domain ip
+	LRUCache<std::string, DnsCache> m_dnsCache; // domain ip
 };
