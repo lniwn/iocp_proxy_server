@@ -108,6 +108,84 @@ ULONG CHttpTunnel::readHeader(LPIOContext pIoCtx, DWORD)
 	}
 }
 
+DWORD CHttpTunnel::rewriteHeader(LPIOContext pIoCtx, DWORD dwLen)
+{
+	auto pFirstLine = StrStrA(pIoCtx->buffer, "\r\n");
+	if (pFirstLine == NULL)
+	{
+		assert(0);
+		return dwLen;
+	}
+	char* pCursor = pIoCtx->buffer;
+
+	//GET http://3g.sina.com.cn HTTP/1.1
+	// skip first method
+	while (pCursor < pFirstLine && *pCursor != ' ')
+	{
+		++pCursor;
+	}
+	// skip space after method
+	while (pCursor < pFirstLine && *pCursor == ' ')
+	{
+		++pCursor;
+	}
+	char* pMemDst = pCursor;
+	// find ://
+	for (; pCursor < pFirstLine && *pCursor != ' '; pCursor++)
+	{
+		if (*pCursor == ':'
+			&& ++pCursor < pFirstLine
+			&& *pCursor == '/'
+			&& ++pCursor < pFirstLine
+			&& *pCursor == '/')
+		{
+			// 让游标移动到"://"的下一位
+			++pCursor;
+			break;
+		}
+	}
+
+	// found ://
+	if (pCursor < pFirstLine && *pCursor != ' ')
+	{
+		while (pCursor < pFirstLine && *pCursor != '/' && *pCursor != ' ')
+		{
+			++pCursor;
+		}
+	}
+	else
+	{
+		return dwLen;
+	}
+
+	if (pCursor >= pFirstLine)
+	{
+		assert(0);
+		return dwLen;
+	}
+
+	if (*pCursor == '/')
+	{
+		assert(pMemDst < pCursor);
+		// 此处内存虽然有重叠，但是由于pCursor大于pMemDst，所以仍然可以使用memcpy
+		memcpy_s(pMemDst, dwLen - (pMemDst - pIoCtx->buffer), pCursor, dwLen - (pCursor - pIoCtx->buffer));
+		return dwLen - static_cast<DWORD>(pCursor - pMemDst);
+	}
+
+	// URL路径没有使用'/'
+	if (*pCursor == ' ')
+	{
+		--pCursor; // 回退一位用于存放'/'
+		assert(pMemDst < pCursor);
+		memcpy_s(pMemDst, dwLen - (pMemDst - pIoCtx->buffer), pCursor, dwLen - (pCursor - pIoCtx->buffer));
+		*pMemDst = '/';
+		return dwLen - static_cast<DWORD>(pCursor - pMemDst);
+	}
+
+	assert(0);
+	return dwLen;
+}
+
 bool CHttpTunnel::sendHttpResponse(LPIOContext pIoCtx, const char* payload)
 {
 	DWORD dwLen = static_cast<DWORD>(strlen(payload));
@@ -341,12 +419,17 @@ bool CHttpTunnel::onServerConnectPosted(LPSocketContext pSocketCtx, DWORD dwLen,
 	else
 	{
 		assert(pSocketCtx->GetCustomData() == PlanHttpProxy);
-		if (!success)
+		if (success)
+		{
+			return __super::onServerConnectPosted(pSocketCtx, 
+				rewriteHeader(pSocketCtx->GetUserToServerContext(), dwLen), success);
+		}
+		else
 		{
 			sendHttpResponse(pSocketCtx->GetServerToUserContext(),
 				"HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n");
+			return false;
 		}
-		return __super::onServerConnectPosted(pSocketCtx, dwLen, success);
 	}
 }
 

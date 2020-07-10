@@ -21,6 +21,7 @@ private:
 	bool handleAcceptBuffer(LPSocketContext pSocketCtx, LPIOContext pIoCtx, DWORD dwLen,
 		SOCKADDR_IN* peerAddr);
 	ULONG readHeader(LPIOContext pIoCtx, DWORD dwLen);
+	DWORD rewriteHeader(LPIOContext pIoCtx, DWORD dwLen);
 	bool sendHttpResponse(LPIOContext pIoCtx, const char* payload);
 	bool extractHost(const char* header, DWORD dwSize, std::string& host, std::string& port);
 	int getHttpProtocol(const char* header, DWORD dwSize);
